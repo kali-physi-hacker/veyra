@@ -1,0 +1,6 @@
+/target/
+/dist/
+*.sqlite*
+*.db*
+.DS_Store
+/benchmark-results/

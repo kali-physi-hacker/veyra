@@ -1,0 +1,13 @@
+[package]
+name = "stratum-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+stratum-domain.workspace = true
+stratum-engine.workspace = true
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+clap.workspace = true
+[lints]
+workspace = true

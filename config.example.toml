@@ -1,0 +1,12 @@
+# Use a dedicated, initially empty private state directory.
+data_dir = "/Users/example/.local/share/stratum"
+scan_roots = ["/Users/example/Projects", "/Applications"]
+exclusions = []
+protected_paths = ["/Users/example/Projects/important"]
+allowed_cleanup_roots = ["/Users/example/Projects"]
+scan_queue_capacity = 512
+batch_size = 1000
+history_retention_days = 90
+monitoring_interval_seconds = 10
+reconciliation_seconds = 3600
+api_bind = "127.0.0.1:7391"

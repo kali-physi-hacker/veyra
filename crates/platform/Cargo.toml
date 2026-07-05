@@ -1,0 +1,15 @@
+[package]
+name = "stratum-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+stratum-domain.workspace = true
+globset = "0.4"
+sysinfo = "0.38"
+blake3.workspace = true
+rustix = { version = "1", features = ["fs"] }
+[dev-dependencies]
+tempfile.workspace = true
+[lints]
+workspace = true

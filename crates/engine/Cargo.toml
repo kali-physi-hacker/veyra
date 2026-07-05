@@ -1,0 +1,28 @@
+[package]
+name = "stratum-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+stratum-domain.workspace = true
+stratum-platform.workspace = true
+stratum-index.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+toml = "1"
+notify = "8"
+plist = "1"
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bench]]
+name = "workloads"
+harness = false
+[[bench]]
+name = "index_scale"
+harness = false
+[lints]
+workspace = true
