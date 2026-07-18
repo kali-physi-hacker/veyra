@@ -7,6 +7,7 @@ MCP is a transport, not the engine. An adapter can link `stratum-engine` in Rust
 | `system_summary`, `list_volumes`, `inspect_process` | `Engine::system`, `/system`, `/volumes`, `/processes/{pid}` |
 | `analyze_disk` | `Engine::scan`, POST `/scans`, `/jobs/{id}`, `/events` |
 | `largest_files`, `largest_directories` | `Engine::files(FileQuery)` with kind/sort/filters |
+| `directory_breakdown`, `inspect_file` | `Engine::directory_breakdown`, `inspect_entry`; `/storage/breakdown`, `/files/inspect` |
 | `find_duplicates` | `Engine::discover_duplicates`, POST `/duplicates/scan` |
 | `list_apps`, `inspect_app` | `Engine::applications`, `inspect_application` |
 | `storage_history` | `Engine::history`, GET `/storage/history` |
@@ -24,5 +25,7 @@ MCP is a transport, not the engine. An adapter can link `stratum-engine` in Rust
 6. Retain the operation ID. Inspect per-item statuses for partial failures; surface them. Use `/cleanup/operations/{id}/undo` only when restoration is requested. Expose audit records for accountability.
 
 MCP tool schemas can be derived from OpenAPI/domain types. Advertise inspection tools as read-only, planning tools as non-destructive local writes, execution as destructive/reversible where supported, and undo as a state-changing action. The adapter should enforce its own user-consent workflow in addition to engine protections. Possession of the token or approval phrase is not evidence of user intent.
+
+Use `StorageExplanation.coverage` for the published index's scope, and `Insight.measurements` for numeric parent shares and actual observation windows. Do not add overlapping findings into a recovery total. The directory breakdown's explicit remainder prevents a bounded map/list response being mistaken for a complete list of every child.
 
 Unsupported operations should return the engine's machine code; an MCP server must not bypass them by issuing filesystem commands. A future richer cleanup executor, platform adapter or history dimension can be added behind the existing service boundaries without moving business logic into MCP.

@@ -312,6 +312,8 @@ pub struct Application {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Insight {
+    #[serde(default)]
+    pub measurements: InsightMeasurements,
     pub id: String,
     pub kind: String,
     pub title: String,
@@ -324,6 +326,16 @@ pub struct Insight {
     pub possible_actions: Vec<String>,
     pub risk: String,
     pub created_at: i64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct InsightMeasurements {
+    pub logical_bytes: u64,
+    pub parent_logical_bytes: Option<u64>,
+    pub share_of_parent_percent: Option<f64>,
+    pub observation_start: Option<i64>,
+    pub observation_end: Option<i64>,
+    pub growth_bytes: Option<u64>,
+    pub growth_bytes_per_day: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CleanupCandidate {
@@ -443,6 +455,20 @@ pub struct StorageExplanation {
     pub insights: Vec<Insight>,
     pub history: Vec<HistoryPoint>,
     pub interpretation: String,
+    /// Only the currently published generation for each indexed root.
+    #[serde(default)]
+    pub coverage: Vec<ScanRecord>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DirectoryBreakdown {
+    pub directory: Entry,
+    pub children: Vec<Entry>,
+    pub child_count: u64,
+    pub children_logical_bytes: u64,
+    pub children_allocated_bytes: u64,
+    pub omitted_count: u64,
+    pub omitted_logical_bytes: u64,
+    pub omitted_allocated_bytes: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResourceSummary {

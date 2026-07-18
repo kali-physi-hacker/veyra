@@ -96,6 +96,11 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum StorageCommand {
+    Breakdown {
+        path: String,
+        #[arg(long, default_value_t = 60)]
+        limit: u32,
+    },
     Largest(QueryArgs),
     LargestFiles(QueryArgs),
     LargestDirs(QueryArgs),
@@ -420,7 +425,7 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>> {
         },
         Command::Scans=>value(engine.scans()?),Command::Reconcile{paths}=>value(engine.reconcile_paths(ReconcileRequest{paths})?),Command::Files(q)=>value(engine.files(&q.query(Some("file")))?),Command::Find{pattern}=>value(engine.files(&FileQuery{name:Some(pattern),..Default::default()})?),
         Command::Storage{command:None}|Command::ExplainStorage=>value(engine.explain_storage()?),
-        Command::Storage{command:Some(c)}=>match c{StorageCommand::Largest(q)|StorageCommand::LargestFiles(q)=>value(engine.files(&q.query(Some("file")))?),StorageCommand::LargestDirs(q)=>value(engine.files(&q.query(Some("directory")))?),StorageCommand::Categories=>value(engine.categories()?),StorageCommand::History{path,since}=>value(engine.history(path.as_deref(),since)?)},
+        Command::Storage{command:Some(c)}=>match c{StorageCommand::Breakdown{path,limit}=>value(engine.directory_breakdown(&path,limit)?),StorageCommand::Largest(q)|StorageCommand::LargestFiles(q)=>value(engine.files(&q.query(Some("file")))?),StorageCommand::LargestDirs(q)=>value(engine.files(&q.query(Some("directory")))?),StorageCommand::Categories=>value(engine.categories()?),StorageCommand::History{path,since}=>value(engine.history(path.as_deref(),since)?)},
         Command::Duplicates{command:Some(DuplicateCommand::Scan)}=>value(engine.discover_duplicates(&stop)?),Command::Duplicates{command:None}=>value(engine.duplicates()?),Command::Duplicates{command:Some(DuplicateCommand::Groups{limit,offset})}=>value(engine.duplicate_groups(limit,offset)?),
         Command::Apps{command:None}=>value(engine.applications()?),Command::Apps{command:Some(AppCommand::Inspect{id})}=>value(engine.inspect_application(&id)?),Command::Apps{command:Some(AppCommand::UninstallPlan{id})}=>engine.uninstall_plan(&id),
         Command::Cleanup{command}=>match command{CleanupCommand::Analyze(q)|CleanupCommand::Candidates(q)=>value(engine.cleanup_candidates(&q.query(Some("file")))?),CleanupCommand::Plan{path}=>value(engine.create_cleanup_plan(PlanRequest{paths:path})?),CleanupCommand::Show{id}=>value(engine.cleanup_plan(&id)?),CleanupCommand::Execute{id,approve}=>value(engine.execute_cleanup_plan(&id,&approve)?),CleanupCommand::Undo{id}=>value(engine.undo_cleanup(&id)?),CleanupCommand::Operation{id}=>value(engine.cleanup_operation(&id)?)},

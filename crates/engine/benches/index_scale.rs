@@ -127,6 +127,15 @@ fn main() {
         .unwrap();
     let query = start.elapsed();
     assert_eq!(dirs.items[0].logical_bytes, count * 4096);
+    let start = Instant::now();
+    let categories = engine.categories().unwrap();
+    let categories_us = start.elapsed().as_micros();
+    let start = Instant::now();
+    let insights = engine.insights().unwrap();
+    println!(
+        "{}",
+        serde_json::json!({"experience_records": count, "categories_us": categories_us, "category_count": categories.len(), "insights_us": start.elapsed().as_micros(), "insight_count": insights.len()})
+    );
     println!(
         "{}",
         serde_json::json!({"synthetic_file_records":count,"sqlite_insert_publish_ms":insertion.as_millis(),"largest_directory_query_us":query.as_micros(),"database_bytes":std::fs::metadata(engine.config.data_dir.join("index.sqlite3")).unwrap().len()})

@@ -30,7 +30,7 @@ impl Store {
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if version > 2 {
+        if version > 4 {
             return Err(Error::new(
                 "unsupported_schema",
                 "Database was created by a newer Stratum release",
@@ -50,6 +50,24 @@ impl Store {
                 .execute_batch(concat!(
                     "BEGIN IMMEDIATE;",
                     include_str!("../../../migrations/002_query_paths.sql"),
+                    "COMMIT;"
+                ))
+                .map_err(db)?;
+        }
+        if version < 3 {
+            connection
+                .execute_batch(concat!(
+                    "BEGIN IMMEDIATE;",
+                    include_str!("../../../migrations/003_experience_queries.sql"),
+                    "COMMIT;"
+                ))
+                .map_err(db)?;
+        }
+        if version < 4 {
+            connection
+                .execute_batch(concat!(
+                    "BEGIN IMMEDIATE;",
+                    include_str!("../../../migrations/004_compact_query_indexes.sql"),
                     "COMMIT;"
                 ))
                 .map_err(db)?;
@@ -124,6 +142,12 @@ impl Store {
         let tx = conn.transaction().map_err(db)?;
         tx.execute("UPDATE scans SET completed=?2,status=?3,entries=?4,warnings=?5,excluded=?6,logical=?7,allocated=?8,freshness=?9 WHERE id=?1", params![scan.id,scan.completed_at,scan.status,scan.entries as i64,scan.warnings as i64,scan.excluded as i64,scan.logical_bytes as i64,scan.allocated_bytes as i64,scan.freshness]).map_err(db)?;
         if scan.status == "completed" || scan.status == "partial" {
+            tx.execute(
+                "DELETE FROM category_totals WHERE scan_id IN (SELECT id FROM scans WHERE root=?1)",
+                [&scan.root],
+            )
+            .map_err(db)?;
+            tx.execute("INSERT INTO category_totals SELECT scan_id,category,sum(logical),sum(allocated),count(*) FROM entries WHERE scan_id=?1 AND kind='file' GROUP BY category", [&scan.id]).map_err(db)?;
             tx.execute("INSERT INTO roots(path,scan_id) VALUES(?1,?2) ON CONFLICT(path) DO UPDATE SET scan_id=excluded.scan_id", params![scan.root,scan.id]).map_err(db)?;
             tx.execute("INSERT INTO history SELECT scan_id,path,?2,logical,allocated,?3 FROM entries WHERE scan_id=?1 AND kind='directory' AND depth<=1", params![scan.id,scan.completed_at,scan.status]).map_err(db)?;
             tx.execute("DELETE FROM entries WHERE scan_id IN (SELECT id FROM scans WHERE root=?1 AND id<>?2)",params![scan.root,scan.id]).map_err(db)?;
@@ -146,8 +170,19 @@ impl Store {
         self.audit("scan_finished", &scan.id, &scan.status)
     }
     pub fn scans(&self) -> Result<Vec<ScanRecord>> {
+        self.scan_records(false)
+    }
+    pub fn published_scans(&self) -> Result<Vec<ScanRecord>> {
+        self.scan_records(true)
+    }
+    fn scan_records(&self, published: bool) -> Result<Vec<ScanRecord>> {
         let conn = self.conn()?;
-        let mut s = conn.prepare("SELECT id,root,started,completed,status,entries,warnings,excluded,logical,allocated,freshness FROM scans ORDER BY started DESC,id LIMIT 1000").map_err(db)?;
+        let condition = if published {
+            "WHERE id IN (SELECT scan_id FROM roots)"
+        } else {
+            ""
+        };
+        let mut s = conn.prepare(&format!("SELECT id,root,started,completed,status,entries,warnings,excluded,logical,allocated,freshness FROM scans {condition} ORDER BY started DESC,id LIMIT 1000")).map_err(db)?;
         s.query_map([], |r| {
             Ok(ScanRecord {
                 id: r.get(0)?,
@@ -218,9 +253,11 @@ impl Store {
         // Fresh bulk-loaded databases may not yet have planner statistics. Pick the
         // narrow domain index explicitly so a directory query cannot scan every file.
         let index = if q.parent.is_some() {
-            "entries_parent"
+            "entries_parent_size"
         } else if q.category.is_some() {
             "entries_category"
+        } else if q.name.is_some() && q.kind.as_deref() == Some("directory") {
+            "entries_directory_name"
         } else {
             match q.sort.as_str() {
                 "allocated_bytes" => "entries_allocated",
@@ -232,6 +269,9 @@ impl Store {
         let mut sql = format!(
             "SELECT e.data FROM roots r CROSS JOIN entries e INDEXED BY {index} ON e.scan_id=r.scan_id WHERE 1=1"
         );
+        if index == "entries_directory_name" {
+            sql.push_str(" AND e.kind='directory'");
+        }
         let mut values = vec![];
         for (column, value) in [
             ("e.parent", &q.parent),
@@ -315,9 +355,53 @@ impl Store {
         )
         .map_err(Into::into)
     }
+    /// One SQLite read snapshot: immediate files and directories plus an exact bounded remainder.
+    pub fn directory_breakdown(&self, path: &str, limit: u32) -> Result<DirectoryBreakdown> {
+        if !(1..=200).contains(&limit) {
+            return Err(Error::invalid("Breakdown limit must be 1..200"));
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(db)?;
+        let data: Option<(String, String)> = tx
+            .query_row(
+                "SELECT scan_id,data FROM current_entries WHERE path=?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let (scan_id, data) =
+            data.ok_or_else(|| Error::new("path_not_found", "Directory is not indexed"))?;
+        let directory: Entry = serde_json::from_str(&data)?;
+        if directory.kind != EntryKind::Directory {
+            return Err(Error::invalid("Breakdown requires an indexed directory"));
+        }
+        let (count, logical, allocated): (i64, i64, i64) = tx.query_row("SELECT count(*),coalesce(sum(logical),0),coalesce(sum(allocated),0) FROM entries WHERE scan_id=?1 AND parent=?2 AND path<>?2", params![scan_id,path], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(db)?;
+        let children: Vec<Entry> = {
+            let mut query = tx.prepare("SELECT data FROM entries INDEXED BY entries_parent_size WHERE scan_id=?1 AND parent=?2 AND path<>?2 ORDER BY logical DESC,path LIMIT ?3").map_err(db)?;
+            query
+                .query_map(params![scan_id, path, limit], |r| r.get::<_, String>(0))
+                .map_err(db)?
+                .map(|r| Ok(serde_json::from_str(&r.map_err(db)?)?))
+                .collect::<Result<_>>()?
+        };
+        tx.commit().map_err(db)?;
+        Ok(DirectoryBreakdown {
+            directory,
+            child_count: count as u64,
+            children_logical_bytes: logical as u64,
+            children_allocated_bytes: allocated as u64,
+            omitted_count: count as u64 - children.len() as u64,
+            omitted_logical_bytes: (logical as u64)
+                .saturating_sub(children.iter().map(|e| e.logical_bytes).sum()),
+            omitted_allocated_bytes: (allocated as u64)
+                .saturating_sub(children.iter().map(|e| e.allocated_bytes).sum()),
+            children,
+        })
+    }
     pub fn categories(&self) -> Result<Vec<CategoryTotal>> {
         let conn = self.conn()?;
-        let mut s=conn.prepare("SELECT category,sum(logical),sum(allocated),count(*) FROM current_entries WHERE kind='file' GROUP BY category ORDER BY sum(logical) DESC").map_err(db)?;
+        let mut s=conn.prepare("SELECT category,sum(logical),sum(allocated),sum(files) FROM category_totals c JOIN roots r ON c.scan_id=r.scan_id GROUP BY category ORDER BY sum(logical) DESC,category").map_err(db)?;
         s.query_map([], |r| {
             Ok(CategoryTotal {
                 category: r.get(0)?,
@@ -607,6 +691,16 @@ impl Store {
         let delta_allocated = replacement.map_or(0, |e| e.allocated_bytes as i128)
             - old.as_ref().map_or(0, |e| e.allocated_bytes as i128);
         let count_delta = i64::from(replacement.is_some()) - i64::from(old.is_some());
+        for (entry, direction) in [(old.as_ref(), -1i64), (replacement, 1i64)] {
+            if let Some(entry) = entry.filter(|e| e.kind == EntryKind::File) {
+                tx.execute("INSERT INTO category_totals(scan_id,category,logical,allocated,files) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(scan_id,category) DO UPDATE SET logical=logical+excluded.logical,allocated=allocated+excluded.allocated,files=files+excluded.files", params![scan_id,entry.category,entry.logical_bytes as i64 * direction,entry.allocated_bytes as i64 * direction,direction]).map_err(db)?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM category_totals WHERE scan_id=?1 AND files=0",
+            [&scan_id],
+        )
+        .map_err(db)?;
         tx.execute(
             "DELETE FROM entries WHERE scan_id=?1 AND path=?2",
             params![scan_id, path],

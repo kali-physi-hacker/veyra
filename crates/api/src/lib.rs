@@ -134,6 +134,8 @@ pub fn router(engine: Arc<Engine>, token: String) -> Router {
         .route("/api/v1/storage/categories", get(categories))
         .route("/api/v1/storage/history", get(history))
         .route("/api/v1/storage/explain", get(explain))
+        .route("/api/v1/storage/breakdown", get(breakdown))
+        .route("/api/v1/files/inspect", get(inspect_entry))
         .route("/api/v1/duplicates", get(duplicates))
         .route("/api/v1/duplicates/groups", get(duplicate_groups))
         .route("/api/v1/duplicates/scan", post(start_duplicates))
@@ -246,6 +248,23 @@ async fn history(
 #[utoipa::path(get,path="/api/v1/storage/explain",responses((status=200,body=StorageExplanation)))]
 async fn explain(State(s): State<ApiState>) -> ApiResult<StorageExplanation> {
     blocking(move || s.engine.explain_storage()).await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathQuery {
+    path: String,
+    limit: Option<u32>,
+}
+#[utoipa::path(get,path="/api/v1/storage/breakdown",params(("path"=String,Query),("limit"=Option<u32>,Query)),responses((status=200,body=DirectoryBreakdown)))]
+async fn breakdown(
+    State(s): State<ApiState>,
+    Query(q): Query<PathQuery>,
+) -> ApiResult<DirectoryBreakdown> {
+    blocking(move || s.engine.directory_breakdown(&q.path, q.limit.unwrap_or(60))).await
+}
+#[utoipa::path(get,path="/api/v1/files/inspect",params(("path"=String,Query)),responses((status=200,body=Entry)))]
+async fn inspect_entry(State(s): State<ApiState>, Query(q): Query<PathQuery>) -> ApiResult<Entry> {
+    blocking(move || s.engine.inspect_entry(&q.path)).await
 }
 #[utoipa::path(get,path="/api/v1/duplicates",responses((status=200,body=DuplicateReport)))]
 async fn duplicates(State(s): State<ApiState>) -> ApiResult<DuplicateReport> {
@@ -372,6 +391,8 @@ async fn events(
         categories,
         history,
         explain,
+        breakdown,
+        inspect_entry,
         duplicates,
         duplicate_groups,
         start_duplicates,

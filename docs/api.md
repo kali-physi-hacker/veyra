@@ -15,6 +15,8 @@ All requests use `Authorization: Bearer <local token>`. Querying is read-only un
 | `/index/reconcile` | POST explicit changed paths for incremental leaf updates |
 | `/files`, `/directories`, `/storage/largest` | GET paginated index queries |
 | `/storage/categories`, `/storage/history`, `/storage/explain` | GET aggregates and evidence |
+| `/storage/breakdown?path=...&limit=60` | GET a directory, largest immediate children and exact omitted-child totals |
+| `/files/inspect?path=...` | GET one indexed entry and classification evidence |
 | `/duplicates` | GET most recently computed duplicate report |
 | `/duplicates/scan` | POST starts staged content verification |
 | `/duplicates/groups` | GET duplicate group pagination using `limit`/`offset` |
@@ -41,6 +43,10 @@ Candidate pagination traverses the corresponding file page and applies discovery
 Duplicate reports retain at most 100 group summaries and expose `group_count`, `truncated`, and `analyzed_at`. All verified memberships are grouped in SQLite; `/duplicates/groups` pages over them. Each group includes its full `file_count` and at most 1,000 representative paths. Reports describe files at analysis time, not a continuing assertion that content remains unchanged. No duplicate report is an executable cleanup authorization.
 
 Directory totals include descendants. Do not sum an ancestor and its child to estimate total storage. Category totals count file paths; hard links and copy-on-write clones can share actual physical storage. Allocated bytes come from OS block metadata and are not exclusive ownership estimates.
+
+`DirectoryBreakdown` includes both files and directories, with `child_count`, `children_logical_bytes`, `children_allocated_bytes`, and explicit `omitted_*` fields. Its limit is 1–200 (default 60); the displayed children plus omitted logical/allocated bytes exactly cover recorded immediate children. Zero-size children still contribute to counts. This is a consistent SQLite read snapshot, not a live filesystem snapshot.
+
+`StorageExplanation.coverage` lists only published root generations rather than every historical scan. Insights now include additive typed `measurements` for logical bytes, parent share, observation window, growth bytes and daily growth rate where meaningful; unavailable measurements are null. Parent/child insights may overlap and must not be summed into reclaimable storage. Growth anomaly comparisons normalize by elapsed time, skip incomplete scans and collapse same-second observations. Developer findings suppress nested matches beneath an already reported developer directory. Recent-large-file observations are not cleanup candidates merely because of size or age.
 
 Scans and expensive duplicate discovery return `{id,status,result,error}` jobs. Poll the job or subscribe to events. `POST /scans` does not imply the scan has completed. Engine failures appear in the job's stable `error.code`. If the process crashes, reconcile job status with scan/operation records. SSE is not a durable event log.
 

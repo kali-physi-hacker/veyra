@@ -1,4 +1,5 @@
 //! Public application API shared by CLI, desktop, HTTP and future MCP adapters.
+mod analysis_rules;
 pub mod applications;
 pub mod cleanup;
 pub mod daemon;
@@ -185,11 +186,28 @@ impl Engine {
                 *exclusion = fs::canonicalize(p)?.to_string_lossy().into();
             }
         }
+        request.exclusions.sort();
+        request.exclusions.dedup();
         let mut output = Vec::new();
         for root in roots {
             output.push(self.scan_root(root, &request)?);
         }
         Ok(output)
+    }
+    /// A UI-friendly scan that preserves the published policy of an existing root.
+    pub fn scan_location(self: &Arc<Self>, root: &str) -> Result<Vec<ScanRecord>> {
+        let canonical = fs::canonicalize(root)?;
+        let root = canonical
+            .to_str()
+            .ok_or_else(|| Error::invalid("Root must be UTF-8"))?
+            .to_string();
+        let mut request = if self.roots()?.contains(&root) {
+            self.scan_policy(&root)?
+        } else {
+            ScanRequest::default()
+        };
+        request.roots = vec![root];
+        self.scan(request)
     }
     fn scan_root(self: &Arc<Self>, root: PathBuf, request: &ScanRequest) -> Result<ScanRecord> {
         let mut record = ScanRecord {
@@ -351,6 +369,12 @@ impl Engine {
     pub fn files(&self, query: &FileQuery) -> Result<Page<Entry>> {
         self.store.files(query)
     }
+    pub fn directory_breakdown(&self, path: &str, limit: u32) -> Result<DirectoryBreakdown> {
+        self.store.directory_breakdown(path, limit)
+    }
+    pub fn inspect_entry(&self, path: &str) -> Result<Entry> {
+        self.store.entry(path)
+    }
     pub fn scan_policy(&self, root: &str) -> Result<ScanRequest> {
         self.store.scan_policy(root)
     }
@@ -370,7 +394,12 @@ impl Engine {
         self.store.documents("operation")
     }
     pub fn scans(&self) -> Result<Vec<ScanRecord>> {
-        let mut scans = self.store.scans()?;
+        Ok(self.adjust_freshness(self.store.scans()?))
+    }
+    pub fn coverage(&self) -> Result<Vec<ScanRecord>> {
+        Ok(self.adjust_freshness(self.store.published_scans()?))
+    }
+    fn adjust_freshness(&self, mut scans: Vec<ScanRecord>) -> Vec<ScanRecord> {
         for scan in &mut scans {
             if scan.freshness == "probably_fresh"
                 && scan
@@ -380,7 +409,7 @@ impl Engine {
                 scan.freshness = "stale".into();
             }
         }
-        Ok(scans)
+        scans
     }
     pub fn categories(&self) -> Result<Vec<CategoryTotal>> {
         self.store.categories()
@@ -392,13 +421,13 @@ impl Engine {
         stratum_platform::system::snapshot()
     }
     pub fn explain_storage(&self) -> Result<StorageExplanation> {
-        let snapshot = self.system();
         Ok(StorageExplanation {
-            resources:ResourceSummary{timestamp:snapshot.timestamp,cpu_percent:snapshot.cpu_percent,used_memory:snapshot.used_memory,total_memory:snapshot.total_memory,volumes:snapshot.volumes},
+            resources:stratum_platform::system::summary(),
             scans:self.scans()?,categories:self.categories()?,
             largest_directories:self.files(&FileQuery {kind:Some("directory".into()),limit:20,..Default::default()})?.items,
             insights:self.insights()?,history:self.history(None,now()-7*86400)?,
-            interpretation:"Sizes describe indexed paths; hard links and APFS clones can share physical blocks. Missing permissions, exclusions and unscanned roots reduce coverage. History compares observed scans, not continuous change attribution.".into()
+            interpretation:"Sizes describe indexed paths; hard links and APFS clones can share physical blocks. Missing permissions, exclusions and unscanned roots reduce coverage. History compares observed scans, not continuous change attribution.".into(),
+            coverage:self.coverage()?,
         })
     }
 }

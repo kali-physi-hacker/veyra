@@ -1,5 +1,35 @@
 use stratum_domain::*;
-use sysinfo::{Disks, System};
+use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
+/// Overview sampling deliberately avoids enumerating every process.
+pub fn summary() -> ResourceSummary {
+    let mut system = System::new_with_specifics(
+        RefreshKind::nothing()
+            .with_memory(MemoryRefreshKind::everything())
+            .with_cpu(CpuRefreshKind::everything()),
+    );
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_cpu_usage();
+    ResourceSummary {
+        timestamp: now(),
+        cpu_percent: system.global_cpu_usage(),
+        used_memory: system.used_memory(),
+        total_memory: system.total_memory(),
+        volumes: volumes(),
+    }
+}
+pub fn volumes() -> Vec<Volume> {
+    Disks::new_with_refreshed_list()
+        .iter()
+        .map(|d| Volume {
+            name: d.name().to_string_lossy().into(),
+            mount: d.mount_point().to_string_lossy().into(),
+            filesystem: d.file_system().to_string_lossy().into(),
+            total_bytes: d.total_space(),
+            available_bytes: d.available_space(),
+            removable: d.is_removable(),
+        })
+        .collect()
+}
 pub fn snapshot() -> SystemSnapshot {
     let mut system = System::new_all();
     let started = std::time::Instant::now();

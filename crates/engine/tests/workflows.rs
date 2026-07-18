@@ -68,6 +68,13 @@ impl Fixture {
 fn persistence_query_reconciliation_and_history() {
     let f = Fixture::new();
     f.scan();
+    assert!(
+        f.engine
+            .insights()
+            .unwrap()
+            .iter()
+            .any(|i| i.kind == "developer_storage")
+    );
     let initial = f
         .engine
         .files(&FileQuery {
@@ -101,7 +108,193 @@ fn persistence_query_reconciliation_and_history() {
             .len()
             >= 2
     );
-    assert!(!reopened.insights().unwrap().is_empty());
+    assert!(
+        reopened
+            .insights()
+            .unwrap()
+            .iter()
+            .all(|i| i.estimated_impact > 0)
+    );
+}
+
+#[test]
+fn breakdown_includes_direct_files_and_accounts_for_remainder() {
+    let f = Fixture::new();
+    fs::write(f.root.join("direct.bin"), vec![1; 4096]).unwrap();
+    fs::write(f.root.join("empty"), []).unwrap();
+    f.scan();
+    let map = f
+        .engine
+        .directory_breakdown(f.root.to_str().unwrap(), 1)
+        .unwrap();
+    assert_eq!(map.children[0].name, "direct.bin");
+    assert_eq!(map.children[0].kind, EntryKind::File);
+    assert_eq!(map.child_count, 3);
+    assert_eq!(map.omitted_count, 2);
+    assert_eq!(
+        map.children_logical_bytes,
+        map.children.iter().map(|e| e.logical_bytes).sum::<u64>() + map.omitted_logical_bytes
+    );
+    assert_eq!(
+        map.children_allocated_bytes,
+        map.children.iter().map(|e| e.allocated_bytes).sum::<u64>() + map.omitted_allocated_bytes
+    );
+    assert!(f.engine.directory_breakdown(&f.artifact(), 10).is_err());
+    assert!(
+        f.engine
+            .directory_breakdown(f.root.to_str().unwrap(), 201)
+            .is_err()
+    );
+}
+
+#[test]
+fn category_rollups_track_incremental_changes_and_republication() {
+    let f = Fixture::new();
+    f.scan();
+    let path = f.root.join("photo.jpg");
+    for size in [2048, 4096] {
+        fs::write(&path, vec![7; size]).unwrap();
+        f.engine
+            .reconcile_paths(ReconcileRequest {
+                paths: vec![path.display().to_string()],
+            })
+            .unwrap();
+        let categories = f.engine.categories().unwrap();
+        let images = categories.iter().find(|c| c.category == "images").unwrap();
+        assert_eq!(images.logical_bytes, size as u64);
+        assert_eq!(images.files, 1);
+    }
+    fs::remove_file(&path).unwrap();
+    f.engine
+        .reconcile_paths(ReconcileRequest {
+            paths: vec![path.display().to_string()],
+        })
+        .unwrap();
+    assert!(
+        !f.engine
+            .categories()
+            .unwrap()
+            .iter()
+            .any(|c| c.category == "images")
+    );
+    let before = f
+        .engine
+        .categories()
+        .unwrap()
+        .iter()
+        .map(|c| c.logical_bytes)
+        .sum::<u64>();
+    f.scan();
+    assert_eq!(
+        before,
+        f.engine
+            .categories()
+            .unwrap()
+            .iter()
+            .map(|c| c.logical_bytes)
+            .sum::<u64>()
+    );
+    assert_eq!(f.engine.coverage().unwrap().len(), 1);
+}
+
+#[test]
+fn developer_insights_suppress_nested_dependencies_and_explain_share() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join("node_modules/a/node_modules/b")).unwrap();
+    fs::write(
+        f.root.join("node_modules/a/node_modules/b/index.js"),
+        "code",
+    )
+    .unwrap();
+    f.scan();
+    let insights = f.engine.insights().unwrap();
+    assert_eq!(
+        insights
+            .iter()
+            .filter(|i| i
+                .related_resources
+                .iter()
+                .any(|p| p.ends_with("node_modules")))
+            .count(),
+        1
+    );
+    let cargo = insights
+        .iter()
+        .find(|i| {
+            i.related_resources
+                .contains(&f.root.join("project/target").display().to_string())
+        })
+        .unwrap();
+    assert!(cargo.measurements.share_of_parent_percent.unwrap() > 0.0);
+    assert!(cargo.measurements.parent_logical_bytes.unwrap() > cargo.measurements.logical_bytes);
+}
+
+#[test]
+fn large_recent_observation_does_not_imply_cleanup_eligibility() {
+    let f = Fixture::new();
+    let path = f.root.join("important-recording.bin");
+    fs::File::create(&path)
+        .unwrap()
+        .set_len(101 * 1024 * 1024)
+        .unwrap();
+    f.scan();
+    let entry = f.engine.inspect_entry(path.to_str().unwrap()).unwrap();
+    let recent: Vec<_> = f
+        .engine
+        .insights()
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.kind == "recent_large_file")
+        .collect();
+    if entry.created_at.is_some() {
+        assert!(
+            recent
+                .iter()
+                .any(|i| i.related_resources.contains(&path.display().to_string()))
+        );
+    }
+    assert!(
+        !f.engine
+            .cleanup_candidates(&FileQuery::default())
+            .unwrap()
+            .items
+            .iter()
+            .any(|c| c.path == path.display().to_string())
+    );
+    assert_eq!(
+        f.engine
+            .create_cleanup_plan(PlanRequest {
+                paths: vec![path.display().to_string()]
+            })
+            .unwrap_err()
+            .code,
+        "invalid_cleanup_plan"
+    );
+}
+
+#[test]
+fn location_rescan_preserves_exclusions_without_accumulating_duplicates() {
+    let f = Fixture::new();
+    let ignored = f.root.join("skip");
+    fs::create_dir(&ignored).unwrap();
+    fs::write(ignored.join("secret"), "skip").unwrap();
+    f.engine
+        .scan(ScanRequest {
+            roots: vec![f.root.display().to_string()],
+            exclusions: vec![ignored.display().to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    for _ in 0..3 {
+        f.engine.scan_location(f.root.to_str().unwrap()).unwrap();
+    }
+    let policy = f.engine.scan_policy(f.root.to_str().unwrap()).unwrap();
+    assert_eq!(policy.exclusions.len(), 2);
+    assert!(
+        f.engine
+            .inspect_entry(ignored.join("secret").to_str().unwrap())
+            .is_err()
+    );
 }
 #[test]
 fn staged_generation_is_invisible_until_publication() {

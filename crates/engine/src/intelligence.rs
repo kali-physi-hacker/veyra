@@ -76,104 +76,18 @@ impl CleanupRule for RegeneratableRule {
         })
     }
 }
-struct DeveloperRule;
-impl AnalysisRule for DeveloperRule {
-    fn metadata(&self) -> RuleMetadata {
-        RuleMetadata {
-            id: "developer_storage_v1",
-            description: "Known development artifact directories",
-            version: 1,
-            risk: "moderate",
-        }
-    }
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Insight>> {
-        let mut out = vec![];
-        for name in [
-            "target",
-            "node_modules",
-            "DerivedData",
-            ".npm",
-            ".gradle",
-            ".m2",
-            ".venv",
-            ".git",
-        ] {
-            for e in ctx
-                .engine
-                .files(&FileQuery {
-                    kind: Some("directory".into()),
-                    name: Some(name.into()),
-                    limit: 100,
-                    ..Default::default()
-                })?
-                .items
-            {
-                let confirmed =
-                    name == "target" && Path::new(&e.parent).join("Cargo.toml").is_file();
-                out.push(Insight{id:format!("dev-{}",blake3::hash(e.path.as_bytes()).to_hex()),kind:"developer_storage".into(),title:format!("{name} occupies {} bytes",e.logical_bytes),description:if confirmed{"Cargo build directory detected beside a Cargo.toml manifest. Rebuilding can recover generated files, but custom data may still be present."}else{"Directory name matches a development storage rule. Presence does not prove expendability."}.into(),evidence:vec![Evidence::new("indexed_directory",format!("{}: {} bytes",e.path,e.logical_bytes)),Evidence::new("rule",if confirmed{"Cargo manifest verified"}else{"Directory-name heuristic"})],confidence:if confirmed{0.95}else{0.75},severity:"info".into(),estimated_impact:e.logical_bytes,related_resources:vec![e.path],possible_actions:if confirmed{vec!["inspect_files".into(),"create_cleanup_plan".into()]}else{vec!["inspect_files".into()]},risk:"moderate".into(),created_at:ctx.observed_at});
-            }
-        }
-        Ok(out)
-    }
-}
-struct GrowthRule;
-impl AnalysisRule for GrowthRule {
-    fn metadata(&self) -> RuleMetadata {
-        RuleMetadata {
-            id: "directory_growth_v1",
-            description: "Observed directory growth against historical baseline",
-            version: 1,
-            risk: "low",
-        }
-    }
-    fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Insight>> {
-        let points = ctx.engine.history(None, ctx.observed_at - 7 * 86400)?;
-        let mut paths = std::collections::BTreeMap::<String, Vec<HistoryPoint>>::new();
-        for p in points.into_iter().filter(|p| p.coverage == "completed") {
-            paths.entry(p.path.clone()).or_default().push(p);
-        }
-        let mut out = vec![];
-        for (path, mut p) in paths {
-            p.sort_by_key(|p| (p.timestamp, p.sequence));
-            if p.len() < 2 {
-                continue;
-            }
-            let first = &p[0];
-            let last = &p[p.len() - 1];
-            if last.logical_bytes <= first.logical_bytes {
-                continue;
-            }
-            let delta = last.logical_bytes - first.logical_bytes;
-            let ratio = delta as f64 / first.logical_bytes.max(1) as f64;
-            if delta < 1024 * 1024 {
-                continue;
-            }
-            let deltas: Vec<f64> = p
-                .windows(2)
-                .map(|v| v[1].logical_bytes as f64 - v[0].logical_bytes as f64)
-                .collect();
-            let anomalous = if deltas.len() >= 4 {
-                let baseline = &deltas[..deltas.len() - 1];
-                let avg = baseline.iter().sum::<f64>() / baseline.len() as f64;
-                let sd = (baseline.iter().map(|v| (v - avg).powi(2)).sum::<f64>()
-                    / baseline.len() as f64)
-                    .sqrt();
-                deltas[deltas.len() - 1] > avg + 3.0 * sd.max(1024.0 * 1024.0)
-            } else {
-                ratio > 0.5 && delta > 1024 * 1024 * 1024
-            };
-            out.push(Insight{id:format!("growth-{}",blake3::hash(path.as_bytes()).to_hex()),kind:if anomalous{"storage_growth_anomaly"}else{"storage_growth"}.into(),title:format!("Directory grew by {delta} bytes"),description:format!("Observed net growth between {} and {}. This window may be shorter than seven days; it does not identify every intermediate change.",first.timestamp,last.timestamp),evidence:vec![Evidence::new("historical_delta",format!("{} -> {} bytes; growth {:.1}%",first.logical_bytes,last.logical_bytes,ratio*100.0)),Evidence::new("anomaly_rule",if deltas.len()>=4{"Latest delta compared with previous mean plus three standard deviations (1 MiB minimum deviation)"}else{"Limited baseline: threshold is >50% and >1 GiB total growth"})],confidence:0.9,severity:if anomalous{"warning"}else{"info"}.into(),estimated_impact:delta,related_resources:vec![path],possible_actions:vec!["inspect_recent_files".into()],risk:"low".into(),created_at:ctx.observed_at});
-        }
-        Ok(out)
-    }
-}
+use crate::analysis_rules::{DeveloperRule, GrowthRule, RecentLargeRule};
 impl Engine {
     pub fn insights(&self) -> Result<Vec<Insight>> {
         let ctx = AnalysisContext {
             engine: self,
             observed_at: now(),
         };
-        let rules: Vec<Box<dyn AnalysisRule>> = vec![Box::new(DeveloperRule), Box::new(GrowthRule)];
+        let rules: Vec<Box<dyn AnalysisRule>> = vec![
+            Box::new(DeveloperRule),
+            Box::new(GrowthRule),
+            Box::new(RecentLargeRule),
+        ];
         let mut insights = vec![];
         for rule in rules {
             insights.extend(rule.analyze(&ctx)?);

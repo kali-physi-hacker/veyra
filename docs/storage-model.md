@@ -8,6 +8,7 @@ SQLite uses WAL, foreign keys, a five-second busy timeout, FULL synchronous jour
 - `roots`: published scan generation for each non-overlapping root.
 - `entries`: generation + exact UTF-8 path key, parent, kind, timestamps, sizes, identity, category, evidence and complete domain JSON.
 - `current_entries`: view over published roots, hiding staged records.
+- `category_totals`: per-generation file counts and byte rollups, published and incrementally updated in the same transactions as their entries.
 - `history`: root and immediate directory totals per successful scan or incremental snapshot, with an observation sequence for timestamp ties.
 - `fingerprints`: sampled and full BLAKE3 hashes keyed by path and complete file identity.
 - `documents`: typed application records such as plans, operation journals, reports and scan policies.
@@ -16,6 +17,10 @@ SQLite uses WAL, foreign keys, a five-second busy timeout, FULL synchronous jour
 - `system_history`: lightweight timestamp/CPU/memory/swap samples.
 
 Indexes cover per-generation size, allocation, parent, category, extension, modification time, inode/device and historical path/time. Largest-directory queries read already computed aggregates; they do not recursively scan at query time. Query strings select from an allow-list of sort fields and parameterize user inputs.
+
+Schema 3 adds category rollups with a backfill from published generations only. Schema 4 uses a small partial directory-name index for analysis rules and replaces the old parent index with a size-ordered covering parent index. It removes an experimental all-entry name index rather than burdening every file insertion with an unnecessary index. Migration tests cover earlier data preservation and rollup backfill. Migrations may take time on a large existing index; never open the upgraded database with an older binary that rejects its schema version.
+
+Category reads now visit compact rollups, not every filesystem entry. Initial publication still computes the rollups once; incremental leaf changes apply old/new category deltas atomically. Cancelled or staged generations do not contribute. A directory breakdown uses a single read transaction for its directory, bounded child list and exact remainder, preventing page-total inconsistencies during concurrent publication.
 
 ## Generation publication
 
