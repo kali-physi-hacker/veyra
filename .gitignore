@@ -1,5 +1,6 @@
 /target/
 /dist/
+/dist-preview/
 *.sqlite*
 *.db*
 .DS_Store

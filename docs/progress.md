@@ -65,3 +65,42 @@ The million-record directory query initially took 6.448 s; the query-index corre
 ## Upcoming work
 
 Broaden native platform adapters and ownership evidence, add per-group file pagination, introduce high-risk purge as a separately authorized operation, retain richer historical aggregate dimensions, validate large filesystem workloads on dedicated storage, and complete desktop accessibility/interaction coverage. MCP remains a thin future adapter over existing APIs.
+
+## Desktop, intelligence and optimization iteration — 2026-09-26
+
+Research and product hypotheses are recorded in [product-research.md](product-research.md), with primary sources from CleanMyMac, DaisyDisk, iStat Menus and GrandPerspective. The focus is faster, trustworthy investigation for developers and technical Mac users, not a claim that the product is commercially ready.
+
+### Implemented
+
+- Guided empty state, native folder selection, drag-and-drop scope review, keyboard shortcuts, grouped sidebar, capacity overview, immediately visible scan scope/freshness, and links from findings into exploration or candidate review.
+- File-inclusive treemap with linked list, metadata/evidence inspector, breadcrumbs, backward/forward navigation, largest/recent-file views and explicit accounting for entries beyond the displayed map limit. The map's standard-widget list is also its keyboard/accessibility alternative.
+- Independent, coalesced queries while a mutation runs; stale responses cannot overwrite current navigation. Worker completion wakes the UI instead of frequent idle polling. Actual scan pause/resume/cancel and duplicate cancellation remain separate from cleanup authorization.
+- A persistent cleanup selection bar, compact grouped file review, exact immutable plan/expiry display, typed approval and a distinct restore/result view. No preselection or broadened cleanup permissions.
+- Clearer application footprint cards, association evidence and non-executable uninstall reports; duplicate observations explicitly retain their analysis-time limitations.
+- Transactionally maintained category rollups; a partial directory-name index and replacement covering parent index. The overview samples summary resources without collecting every process.
+- Developer findings suppress nested dependency matches and carry typed parent-share measurements. Recent large files are observations, not deletion recommendations. Growth anomalies normalize by elapsed time and exclude partial/same-time comparisons.
+- Additive API/CLI directory breakdown and entry inspection, generated OpenAPI, and schema 1/2→4 migration coverage.
+
+### Measurements
+
+Same M2 Max development machine; background apps, builds and APFS capacity pressure were present. These are individual exploratory runs, not isolated distribution statistics or performance guarantees. Sizes refer to synthetic indexed metadata, not real million-file scans.
+
+| Measurement | Before iteration | Final implementation |
+| --- | --- | --- |
+| 100k records: category query | 359.514 ms | 0.032 ms |
+| 100k records: insight rules (no findings in this fixture) | 3.009 ms | 0.318 ms |
+| 100k records: insert + publish | 5.628 s | 7.091 s |
+| 100k records: database size | 131,526,656 bytes | 132,403,200 bytes |
+| 1m records: category query | Not measured in the old implementation | 0.070 ms |
+| 1m records: insight rules (no findings) | Not measured | 1.717 ms |
+| 1m records: largest directory query | Earlier release: 23.954 ms | 19.536 ms |
+| 1m records: insert + publish | Earlier release: 82.636 s | 89.888 s |
+| 1m records: database size | Earlier release: 1,328,574,464 bytes | 1,337,376,768 bytes |
+
+Read latency improved substantially; publication still performs the one-time aggregation and carries some write cost. An intermediate full-entry name index increased storage and insertion cost; the final partial index and removal of the superseded parent index avoided that duplication. The earlier three-million-record results above belong to the initial release, not a rerun of this iteration.
+
+### Validation boundaries
+
+All 50 tests pass, along with formatting and strict all-target/all-feature Clippy. The suite includes headless desktop pointer interactions that verify no automatic first-run scan, direct-file inspection, navigation during work, disabled execution without an exact approval phrase, actual fixture quarantine after approval, and byte-preserving restore. Additional tests cover rate-normalized anomalies, nested developer findings, recent-large-file safety, rollup reconciliation and API remainder accounting.
+
+Native screenshots were inspected for onboarding, overview, map and cleanup. Native UI automation was unavailable and macOS Accessibility automation permission was absent; native file-dialog interaction and screen-reader quality remain unverified. AccessKit support is enabled, but that is not an accessibility certification. Signing/notarization, hosted CI, independent safety review and customer willingness to pay remain outstanding. Preview packaging is separate from the already-open original build; older binaries must not share an upgraded state database.

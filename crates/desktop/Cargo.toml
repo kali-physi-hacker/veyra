@@ -7,8 +7,11 @@ license.workspace = true
 stratum-domain.workspace = true
 stratum-engine.workspace = true
 serde_json.workspace = true
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.33", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 clap.workspace = true
 tokio.workspace = true
+rfd = "0.17"
+[dev-dependencies]
+tempfile.workspace = true
 [lints]
 workspace = true

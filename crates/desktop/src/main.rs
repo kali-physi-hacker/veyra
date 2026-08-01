@@ -1,7 +1,15 @@
+mod cleanup;
+mod design;
+mod overview;
+mod storage;
+#[cfg(test)]
+mod ui_tests;
+mod work;
 use clap::Parser;
+use design::*;
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::{
-    collections::HashSet,
+    collections::BTreeMap,
     sync::{Arc, atomic::AtomicBool, mpsc},
 };
 use stratum_domain::*;
@@ -9,7 +17,7 @@ use stratum_engine::Engine;
 
 const TEAL: Color32 = Color32::from_rgb(72, 214, 184);
 const MUTED: Color32 = Color32::from_rgb(139, 154, 177);
-const PANEL: Color32 = Color32::from_rgb(22, 30, 43);
+const PANEL: Color32 = Color32::from_rgb(26, 30, 43);
 const COLORS: [Color32; 6] = [
     TEAL,
     Color32::from_rgb(104, 151, 232),
@@ -61,7 +69,9 @@ impl Page {
             Self::Explorer => {
                 "Explore indexed paths. Open a directory to see its immediate children."
             }
-            Self::Map => "Area represents indexed logical bytes. Click a directory to drill down.",
+            Self::Map => {
+                "Files and folders, in proportion. Inspect an item or open a folder to go deeper."
+            }
             Self::Cleanup => {
                 "Select specific files, review an immutable plan, then explicitly approve."
             }
@@ -81,9 +91,12 @@ impl Page {
     }
 }
 enum Payload {
+    Unindexed,
+    NoDuplicateReport,
     Overview(StorageExplanation),
     Files(domain::Page<Entry>),
-    Candidates(domain::Page<CleanupCandidate>),
+    Candidates(domain::Page<CleanupCandidate>, Vec<CleanupOperation>),
+    Breakdown(DirectoryBreakdown),
     Apps(Vec<Application>),
     Duplicates(DuplicateReport),
     DuplicatePage(domain::Page<DuplicateGroup>),
@@ -96,12 +109,24 @@ enum Payload {
     Operation(CleanupOperation),
     Scanned(Vec<ScanRecord>),
 }
+enum Message {
+    Query(u64, Result<Payload>),
+    Mutation(Result<Payload>),
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileMode {
+    Children,
+    Largest,
+    Recent,
+}
 use stratum_engine::domain;
 struct App {
     engine: Arc<Engine>,
     page: Page,
-    tx: mpsc::Sender<Result<Payload>>,
-    rx: mpsc::Receiver<Result<Payload>>,
+    tx: mpsc::Sender<Message>,
+    rx: mpsc::Receiver<Message>,
+    ctx: egui::Context,
+    queries: work::LatestRequest,
     events: tokio::sync::broadcast::Receiver<OperationEvent>,
     busy: bool,
     status: String,
@@ -121,15 +146,30 @@ struct App {
     insights: Vec<Insight>,
     history: Vec<HistoryPoint>,
     audit: Vec<AuditRecord>,
-    selected: HashSet<String>,
+    selected: BTreeMap<String, u64>,
     plan: Option<CleanupPlan>,
     operation: Option<CleanupOperation>,
     approval: String,
     operation_lookup: String,
     uninstall: Option<serde_json::Value>,
+    breakdown: Option<DirectoryBreakdown>,
+    selected_entry: Option<Entry>,
+    hovered_path: Option<String>,
+    file_mode: FileMode,
+    nav_back: Vec<String>,
+    nav_forward: Vec<String>,
+    show_scan_dialog: bool,
+    indexed_roots: Vec<String>,
+    cleanup_scope: Option<String>,
+    operations: Vec<CleanupOperation>,
+    active_scan: Option<String>,
+    scan_started: Option<std::time::Instant>,
+    paused: bool,
+    duplicate_cancel: Arc<AtomicBool>,
+    duplicate_running: bool,
 }
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, engine: Arc<Engine>, page: Page) -> Self {
+    fn new(ctx: &egui::Context, engine: Arc<Engine>, page: Page) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(14, 20, 30);
         visuals.window_fill = PANEL;
@@ -138,8 +178,8 @@ impl App {
         visuals.selection.stroke.color = TEAL;
         visuals.widgets.noninteractive.bg_stroke =
             egui::Stroke::new(1.0, Color32::from_rgb(43, 55, 72));
-        cc.egui_ctx.set_visuals(visuals);
-        let mut style = (*cc.egui_ctx.style()).clone();
+        ctx.set_visuals(visuals);
+        let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(12.0, 12.0);
         style.spacing.button_padding = Vec2::new(12.0, 8.0);
         style
@@ -148,10 +188,11 @@ impl App {
         style
             .text_styles
             .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-        cc.egui_ctx.set_style(style);
+        ctx.set_style(style);
         let (tx, rx) = mpsc::channel();
         let events = engine.subscribe();
-        let indexed_root = engine.roots().ok().and_then(|r| r.first().cloned());
+        let indexed_roots = engine.roots().unwrap_or_default();
+        let indexed_root = indexed_roots.first().cloned();
         let root = indexed_root
             .clone()
             .unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
@@ -160,6 +201,8 @@ impl App {
             page,
             tx,
             rx,
+            ctx: ctx.clone(),
+            queries: work::LatestRequest::default(),
             events,
             busy: false,
             status: "Ready · local only".into(),
@@ -179,12 +222,27 @@ impl App {
             insights: vec![],
             history: vec![],
             audit: vec![],
-            selected: HashSet::new(),
+            selected: BTreeMap::new(),
             plan: None,
             operation: None,
             approval: String::new(),
             operation_lookup: String::new(),
             uninstall: None,
+            breakdown: None,
+            selected_entry: None,
+            hovered_path: None,
+            file_mode: FileMode::Children,
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+            show_scan_dialog: false,
+            indexed_roots,
+            cleanup_scope: None,
+            operations: Vec::new(),
+            active_scan: None,
+            scan_started: None,
+            paused: false,
+            duplicate_cancel: Arc::new(AtomicBool::new(false)),
+            duplicate_running: false,
         };
         app.refresh();
         app
@@ -195,87 +253,185 @@ impl App {
         }
         self.busy = true;
         self.error = None;
-        self.status = "Working…".into();
+        self.status = "Working locally…".into();
         let engine = self.engine.clone();
         let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(work(engine));
+            let _ = tx.send(Message::Mutation(work(engine)));
+            ctx.request_repaint();
         });
     }
     fn refresh(&mut self) {
+        self.queries.request();
+        self.launch_query();
+    }
+    fn launch_query(&mut self) {
+        let Some(revision) = self.queries.begin() else {
+            return;
+        };
         let page = self.page;
         let path = self.path.clone();
+        let scope = self.cleanup_scope.clone();
         let offset = self.offset;
         let sort = self.sort.clone();
         let search = self.search.clone();
-        self.task(move |e| match page {
-            Page::Overview => Ok(Payload::Overview(e.explain_storage()?)),
-            Page::Explorer | Page::Map => Ok(Payload::Files(e.files(&FileQuery {
-                parent: if path.is_empty() { None } else { Some(path) },
-                kind: if page == Page::Map {
-                    Some("directory".into())
-                } else {
-                    None
-                },
-                name: if search.is_empty() {
-                    None
-                } else {
-                    Some(search)
-                },
-                sort,
-                limit: 100,
-                offset,
-                ..Default::default()
-            })?)),
-            Page::Cleanup => Ok(Payload::Candidates(e.cleanup_candidates(&FileQuery {
-                limit: 100,
-                offset,
-                ..Default::default()
-            })?)),
-            Page::Apps => Ok(Payload::Apps(e.applications()?)),
-            Page::Duplicates => {
-                if offset == 0 {
-                    Ok(Payload::Duplicates(e.duplicates()?))
-                } else {
-                    Ok(Payload::DuplicatePage(e.duplicate_groups(100, offset)?))
+        let mode = self.file_mode;
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let e = engine;
+                match page {
+                    Page::Overview => Ok(Payload::Overview(e.explain_storage()?)),
+                    Page::Explorer => Ok(Payload::Files(e.files(&FileQuery {
+                        parent: if mode == FileMode::Children && !path.is_empty() {
+                            Some(path.clone())
+                        } else {
+                            None
+                        },
+                        path: if mode != FileMode::Children && !path.is_empty() {
+                            Some(path)
+                        } else {
+                            None
+                        },
+                        kind: if mode == FileMode::Children {
+                            None
+                        } else {
+                            Some("file".into())
+                        },
+                        modified_after: if mode == FileMode::Recent {
+                            Some(now() - 7 * 86400)
+                        } else {
+                            None
+                        },
+                        name: if search.is_empty() {
+                            None
+                        } else {
+                            Some(search)
+                        },
+                        sort: if mode == FileMode::Recent {
+                            "modified_at".into()
+                        } else {
+                            sort
+                        },
+                        limit: 100,
+                        offset,
+                        ..Default::default()
+                    })?)),
+                    Page::Map if path.is_empty() => Ok(Payload::Unindexed),
+                    Page::Map => Ok(Payload::Breakdown(e.directory_breakdown(&path, 60)?)),
+                    Page::Cleanup => Ok(Payload::Candidates(
+                        e.cleanup_candidates(&FileQuery {
+                            path: scope,
+                            limit: 100,
+                            offset,
+                            ..Default::default()
+                        })?,
+                        e.cleanup_operations()?,
+                    )),
+                    Page::Apps => Ok(Payload::Apps(e.applications()?)),
+                    Page::Duplicates => {
+                        if offset == 0 {
+                            match e.duplicates() {
+                                Ok(report) => Ok(Payload::Duplicates(report)),
+                                Err(error) if error.code == "not_found" => {
+                                    Ok(Payload::NoDuplicateReport)
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            Ok(Payload::DuplicatePage(e.duplicate_groups(100, offset)?))
+                        }
+                    }
+                    Page::System => Ok(Payload::System(e.system())),
+                    Page::Insights => Ok(Payload::Insights(e.insights()?)),
+                    Page::History => Ok(Payload::History(
+                        e.history(if path.is_empty() { None } else { Some(&path) }, 0)?,
+                    )),
+                    Page::Audit => Ok(Payload::Audit(e.audit(100, offset)?)),
                 }
-            }
-            Page::System => Ok(Payload::System(e.system())),
-            Page::Insights => Ok(Payload::Insights(e.insights()?)),
-            Page::History => Ok(Payload::History(
-                e.history(if path.is_empty() { None } else { Some(&path) }, 0)?,
-            )),
-            Page::Audit => Ok(Payload::Audit(e.audit(100, offset)?)),
+            })();
+            let _ = tx.send(Message::Query(revision, result));
+            ctx.request_repaint();
         });
     }
     fn receive(&mut self) {
-        while let Ok(result) = self.rx.try_recv() {
-            self.busy = false;
-            self.status = "Updated · local only".into();
+        for _ in 0..1024 {
+            match self.events.try_recv() {
+                Ok(OperationEvent::ScanStarted { scan_id, .. }) => {
+                    self.active_scan = Some(scan_id);
+                }
+                Ok(OperationEvent::ScanProgress {
+                    scan_id,
+                    entries,
+                    bytes: count,
+                    ..
+                }) => {
+                    self.active_scan = Some(scan_id);
+                    self.status = format!(
+                        "Indexed {entries} entries · {} discovered · {}s elapsed",
+                        bytes(count),
+                        self.scan_started.map_or(0, |t| t.elapsed().as_secs())
+                    );
+                }
+                Ok(OperationEvent::ScanCompleted { scan }) => {
+                    self.active_scan = None;
+                    self.paused = false;
+                    self.status = format!(
+                        "{} · {} entries · {} warnings",
+                        scan.status, scan.entries, scan.warnings
+                    );
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        while let Ok(message) = self.rx.try_recv() {
+            let result = match message {
+                Message::Query(revision, result) => {
+                    if !self.queries.finish(revision) {
+                        self.launch_query();
+                        continue;
+                    }
+                    result
+                }
+                Message::Mutation(result) => {
+                    self.busy = false;
+                    self.duplicate_running = false;
+                    self.active_scan = None;
+                    self.scan_started = None;
+                    result
+                }
+            };
             match result {
                 Err(e) => {
-                    self.status = "Operation failed".into();
                     self.error = Some(e.to_string());
+                    self.status = "Could not complete this request".into();
                 }
                 Ok(payload) => match payload {
+                    Payload::Unindexed => self.breakdown = None,
+                    Payload::NoDuplicateReport => {
+                        self.duplicates = None;
+                        self.has_more = false;
+                    }
                     Payload::Overview(v) => {
-                        if self.path.is_empty()
-                            && let Some(scan) = v
-                                .scans
-                                .iter()
-                                .find(|s| s.status == "completed" || s.status == "partial")
-                        {
-                            self.path = scan.root.clone();
-                        }
+                        self.indexed_roots = v.coverage.iter().map(|s| s.root.clone()).collect();
                         self.overview = Some(v);
                     }
                     Payload::Files(v) => {
                         self.files = v.items;
                         self.has_more = v.has_more;
                     }
-                    Payload::Candidates(v) => {
+                    Payload::Breakdown(v) => {
+                        self.breakdown = Some(v);
+                    }
+                    Payload::Candidates(v, operations) => {
                         self.candidates = v.items;
                         self.has_more = v.has_more;
+                        self.operations = operations;
                     }
                     Payload::Apps(v) => self.apps = v,
                     Payload::Duplicates(v) => {
@@ -294,35 +450,73 @@ impl App {
                     Payload::History(v) => self.history = v,
                     Payload::Audit(v) => self.audit = v,
                     Payload::Plan(v) => {
+                        self.status = "Plan ready for review · no files moved".into();
                         self.plan = Some(v);
+                        self.operation = None;
                         self.approval.clear();
                     }
                     Payload::Operation(v) => {
+                        self.status =
+                            format!("Operation {} · inspect the per-file outcome", v.status);
                         self.operation_lookup = v.id.clone();
                         self.operation = Some(v);
+                        self.plan = None;
+                        self.approval.clear();
                         self.selected.clear();
+                        self.refresh();
                     }
-                    Payload::Scanned(v) => {
-                        self.status = format!(
-                            "Indexed {} entries · {} warnings",
-                            v.iter().map(|s| s.entries).sum::<u64>(),
-                            v.iter().map(|s| s.warnings).sum::<u64>()
-                        );
+                    Payload::Scanned(records) => {
+                        for scan in records {
+                            if matches!(scan.status.as_str(), "completed" | "partial")
+                                && !self.indexed_roots.contains(&scan.root)
+                            {
+                                self.indexed_roots.push(scan.root.clone());
+                            }
+                            if self.path.is_empty() {
+                                self.path = scan.root;
+                            }
+                        }
                         self.refresh();
                     }
                 },
             }
+            self.launch_query();
         }
-        while let Ok(event) = self.events.try_recv() {
-            match event {
-                OperationEvent::ScanProgress { entries, .. } => {
-                    self.status = format!("Indexing · {entries} entries")
-                }
-                OperationEvent::ScanWarning { code, .. } => {
-                    self.status = format!("Indexing with warning · {code}")
-                }
-                _ => {}
-            }
+    }
+    fn choose_page(&mut self, page: Page) {
+        if self.page == page {
+            return;
+        }
+        self.page = page;
+        self.offset = 0;
+        self.has_more = false;
+        self.error = None;
+        self.refresh();
+    }
+    fn start_scan(&mut self) {
+        if self.busy || self.root.is_empty() {
+            return;
+        }
+        self.show_scan_dialog = false;
+        self.scan_started = Some(std::time::Instant::now());
+        self.paused = false;
+        let root = self.root.clone();
+        self.task(move |e| Ok(Payload::Scanned(e.scan_location(&root)?)));
+    }
+    fn reveal(&mut self, path: &str) {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+        {
+            self.error = Some(error.to_string());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            self.error =
+                Some("Reveal in file manager is currently supported on macOS only.".into());
         }
     }
     fn metric(ui: &mut egui::Ui, label: &str, value: String, detail: &str) {
@@ -340,382 +534,190 @@ impl App {
                 });
             });
     }
-    fn overview(&mut self, ui: &mut egui::Ui) {
-        let Some(v) = &self.overview else {
-            ui.label("Scan a directory to begin building your local storage index.");
-            return;
-        };
-        let total = v.categories.iter().map(|c| c.logical_bytes).sum();
-        let files = v.categories.iter().map(|c| c.files).sum::<u64>();
-        let warnings = v.scans.first().map_or(0, |s| s.warnings);
-        ui.horizontal_wrapped(|ui| {
-            Self::metric(
-                ui,
-                "Indexed storage",
-                bytes(total),
-                "Logical bytes across indexed files",
-            );
-            let volume = v
-                .resources
-                .volumes
-                .iter()
-                .find(|volume| volume.mount == "/")
-                .or_else(|| v.resources.volumes.first());
-            Self::metric(
-                ui,
-                "Available on system volume",
-                volume.map_or_else(|| "Unavailable".into(), |v| bytes(v.available_bytes)),
-                volume.map_or("No volume observation", |v| v.mount.as_str()),
-            );
-            Self::metric(
-                ui,
-                "CPU",
-                format!("{:.1}%", v.resources.cpu_percent),
-                "Measured at last refresh",
-            );
-            Self::metric(
-                ui,
-                "Memory",
-                bytes(v.resources.used_memory),
-                &format!("of {} total", bytes(v.resources.total_memory)),
-            );
-        });
-        ui.label(
-            RichText::new(format!(
-                "{files} indexed files · {} evidence-based insights · {warnings} coverage warnings",
-                v.insights.len()
-            ))
-            .small()
-            .color(MUTED),
-        );
-        ui.add_space(14.0);
-        ui.columns(2,|cols|{
-            cols[0].heading("Storage composition");for (i,c) in v.categories.iter().enumerate(){let ratio=if total==0{0.0}else{c.logical_bytes as f32/total as f32};cols[0].horizontal(|ui|{ui.label(RichText::new(c.category.replace('_'," ")).color(COLORS[i%6]));ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{ui.label(bytes(c.logical_bytes));});});cols[0].add(egui::ProgressBar::new(ratio).fill(COLORS[i%6]).desired_height(7.0));}
-            cols[1].heading("Worth a closer look");if v.insights.is_empty(){cols[1].label("No rule findings yet. Scan development folders or build a history with another scan.");}for i in v.insights.iter().take(4){insight_card(&mut cols[1],i);}
-        });
-        ui.add_space(16.0);
-        ui.label(RichText::new(&v.interpretation).small().color(MUTED));
-        egui::CollapsingHeader::new("Scan coverage & freshness").show(ui, |ui| {
-            for s in &v.scans {
-                ui.label(format!(
-                    "{} · {} · {} · {} warnings · {} exclusions",
-                    s.root, s.status, s.freshness, s.warnings, s.excluded
-                ));
-            }
-        });
-    }
-    fn navigation(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Directory");
-            let response = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(400.0));
-            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.offset = 0;
-                self.refresh();
-            }
-            if ui.button("Open").clicked() {
-                self.offset = 0;
-                self.refresh();
-            }
-            if ui.button("Parent").clicked()
-                && let Some(parent) = std::path::Path::new(&self.path).parent()
-            {
-                self.path = parent.to_string_lossy().into();
-                self.offset = 0;
-                self.refresh();
-            }
-        });
-    }
-    fn explorer(&mut self, ui: &mut egui::Ui) {
-        self.navigation(ui);
-        ui.horizontal(|ui| {
-            ui.label("Name glob");
-            ui.text_edit_singleline(&mut self.search);
-            egui::ComboBox::from_id_salt("sort")
-                .selected_text(&self.sort)
-                .show_ui(ui, |ui| {
-                    for sort in ["logical_bytes", "allocated_bytes", "modified_at", "path"] {
-                        ui.selectable_value(&mut self.sort, sort.into(), sort);
-                    }
-                });
-            if ui.button("Apply").clicked() {
-                self.offset = 0;
-                self.refresh();
-            }
-        });
-        let mut navigate = None;
-        egui::Grid::new("files")
-            .num_columns(4)
-            .striped(true)
-            .spacing([22.0, 12.0])
-            .min_col_width(90.0)
-            .show(ui, |ui| {
-                ui.strong("NAME / PATH");
-                ui.strong("LOGICAL");
-                ui.strong("ALLOCATED");
-                ui.strong("CATEGORY");
-                ui.end_row();
-                for e in &self.files {
-                    if e.kind == EntryKind::Directory {
-                        if ui
-                            .link(format!("{} /", e.name))
-                            .on_hover_text(&e.path)
-                            .clicked()
-                        {
-                            navigate = Some(e.path.clone());
-                        }
-                    } else {
-                        ui.label(&e.name).on_hover_text(&e.path);
-                    }
-                    ui.label(bytes(e.logical_bytes));
-                    ui.label(bytes(e.allocated_bytes));
-                    ui.label(e.category.replace('_', " "))
-                        .on_hover_text(format!(
-                            "confidence {:.0}% · {}",
-                            e.confidence * 100.0,
-                            e.evidence.first().map(|e| e.detail.as_str()).unwrap_or("")
-                        ));
-                    ui.end_row();
-                }
-            });
-        if let Some(path) = navigate {
-            self.path = path;
-            self.offset = 0;
-            self.refresh();
-        }
-        self.pager(ui);
-    }
-    fn pager(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(self.offset >= 100, egui::Button::new("Previous"))
-                .clicked()
-            {
-                self.offset -= 100;
-                self.refresh();
-            }
-            ui.label(format!("Offset {} · page size 100", self.offset));
-            if ui
-                .add_enabled(self.has_more, egui::Button::new("Next"))
-                .clicked()
-            {
-                self.offset += 100;
-                self.refresh();
-            }
-        });
-    }
-    fn map(&mut self, ui: &mut egui::Ui) {
-        self.navigation(ui);
-        if self.files.is_empty() {
-            ui.label("No child directories in this indexed location.");
-            return;
-        }
-        let items: Vec<_> = self.files.iter().filter(|e| e.logical_bytes > 0).collect();
-        let total = items.iter().map(|e| e.logical_bytes).sum::<u64>();
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 420.0), egui::Sense::hover());
-        let mut tiles = vec![];
-        treemap(&items, rect, &mut tiles);
-        let mut selected = None;
-        for (i, (e, rect)) in tiles.into_iter().enumerate() {
-            let color = COLORS[i % 6].gamma_multiply(0.5);
-            ui.painter().rect_filled(rect.shrink(2.0), 6.0, color);
-            let r = ui.interact(rect, ui.id().with(&e.path), egui::Sense::click());
-            if rect.width() > 75.0 && rect.height() > 45.0 {
-                ui.painter().text(
-                    rect.min + Vec2::splat(12.0),
-                    egui::Align2::LEFT_TOP,
-                    format!(
-                        "{}\n{}",
-                        truncate(&e.name, ((rect.width() - 24.0) / 8.0) as usize),
-                        bytes(e.logical_bytes)
-                    ),
-                    egui::FontId::proportional(14.0),
-                    Color32::WHITE,
-                );
-            }
-            if r.on_hover_text(format!("{}\n{}", e.path, bytes(e.logical_bytes)))
-                .clicked()
-            {
-                selected = Some(e.path.clone());
-            }
-        }
-        ui.label(RichText::new(format!("{} across {} displayed child directories. Direct files and additional pages are not shown.",bytes(total),items.len())).color(MUTED));
-        if let Some(path) = selected {
-            self.path = path;
-            self.offset = 0;
-            self.refresh();
-        }
-    }
-    fn cleanup(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Existing operation ID");
-            ui.text_edit_singleline(&mut self.operation_lookup);
-            if ui
-                .add_enabled(
-                    !self.busy && !self.operation_lookup.is_empty(),
-                    egui::Button::new("Load for inspection / restore"),
-                )
-                .clicked()
-            {
-                let id = self.operation_lookup.clone();
-                self.task(move |e| Ok(Payload::Operation(e.cleanup_operation(&id)?)));
-            }
-        });
-        ui.label(RichText::new("Quarantine moves files on the same filesystem. It preserves undo but does not free disk space until the files are removed later.").color(Color32::from_rgb(231,180,99)));
-        ui.label("Candidate discovery is conservative: verified Cargo target files and recognized package caches. Stop active builds before applying a plan.");
-        if ui
-            .add_enabled(
-                !self.selected.is_empty() && !self.busy,
-                egui::Button::new(format!(
-                    "Create plan for {} selected files",
-                    self.selected.len()
-                )),
-            )
-            .clicked()
-        {
-            let paths = self.selected.iter().cloned().collect();
-            self.task(move |e| Ok(Payload::Plan(e.create_cleanup_plan(PlanRequest { paths })?)));
-        }
-        for c in &self.candidates {
-            ui.horizontal(|ui| {
-                let mut checked = self.selected.contains(&c.path);
-                if ui.checkbox(&mut checked, "").changed() {
-                    if checked {
-                        self.selected.insert(c.path.clone());
-                    } else {
-                        self.selected.remove(&c.path);
-                    }
-                }
-                ui.label(RichText::new(bytes(c.size)).color(TEAL));
-                ui.label(&c.path);
-            });
-            ui.label(
-                RichText::new(format!("{} · risk {} · reversible", c.reason, c.risk))
-                    .small()
-                    .color(MUTED),
-            );
-        }
-        self.pager(ui);
-        if let Some(p) = self.plan.clone() {
-            ui.separator();
-            ui.heading("Review immutable plan");
-            ui.label(format!(
-                "{} · {} files · {} · {} risk",
-                p.id,
-                p.items.len(),
-                bytes(p.total_bytes),
-                p.risk
-            ));
-            egui::CollapsingHeader::new("Exact approved selection")
-                .default_open(true)
-                .show(ui, |ui| {
-                    for item in &p.items {
-                        ui.label(format!("{}  {}", bytes(item.bytes), item.path));
-                    }
-                });
-            ui.label("Type this exact phrase to authorize the move:");
-            ui.monospace(&p.approval_phrase);
-            ui.text_edit_singleline(&mut self.approval);
-            if ui
-                .add_enabled(
-                    self.approval == p.approval_phrase && !self.busy,
-                    egui::Button::new("Approve and quarantine")
-                        .fill(Color32::from_rgb(116, 64, 44)),
-                )
-                .clicked()
-            {
-                let approval = self.approval.clone();
-                self.task(move |e| {
-                    Ok(Payload::Operation(
-                        e.execute_cleanup_plan(&p.id, &approval)?,
-                    ))
-                });
-            }
-        }
-        if let Some(o) = self.operation.clone() {
-            ui.separator();
-            ui.heading(format!("Operation · {}", o.status));
-            ui.monospace(&o.id);
-            for item in &o.items {
-                ui.label(format!("{} · {}", item.status, item.source));
-                if let Some(error) = &item.error {
-                    ui.colored_label(Color32::LIGHT_RED, error);
-                }
-            }
-            if ui
-                .add_enabled(!self.busy, egui::Button::new("Restore quarantined files"))
-                .clicked()
-            {
-                self.task(move |e| Ok(Payload::Operation(e.undo_cleanup(&o.id)?)));
-            }
-        }
-    }
     fn apps(&mut self, ui: &mut egui::Ui) {
-        if self.apps.is_empty() {
-            ui.label(
-                "No indexed macOS bundles. Scan /Applications and relevant user Library locations.",
+        if self.apps.is_empty() && !self.queries.loading() {
+            empty(
+                ui,
+                "No indexed application bundles",
+                "Scan /Applications and relevant Library locations. Footprints only include paths actually observed.",
             );
         }
         let mut requested = None;
-        for app in &self.apps {
-            egui::CollapsingHeader::new(format!("{}     {}",app.name,bytes(app.footprint_bytes))).show(ui,|ui|{ui.label(&app.coverage);for a in &app.associations{ui.label(format!("{} · {} · {}",bytes(a.bytes),a.confidence,a.path));for e in &a.evidence{ui.label(RichText::new(&e.detail).small().color(MUTED));}}ui.label("Uninstall execution is unsupported in this release; associations are for review.");});
-            if ui
-                .add_enabled(
-                    !self.busy,
-                    egui::Button::new(format!("Prepare uninstall review for {}", app.name)),
-                )
-                .clicked()
-            {
-                requested = Some(app.id.clone());
-            }
+        let mut reveal = None;
+        for app in self.apps.iter().take(100) {
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&app.name).size(23.0).strong());
+                    pill(ui, &bytes(app.footprint_bytes), ACCENT);
+                    pill(ui, "Estimated footprint", MUTED);
+                });
+                if let Some(id) = &app.bundle_id {
+                    ui.label(RichText::new(id).monospace().small().color(MUTED));
+                }
+                ui.label(RichText::new(&app.coverage).small().color(MUTED));
+                egui::CollapsingHeader::new(format!(
+                    "{} observed storage locations",
+                    app.associations.len()
+                ))
+                .id_salt(&app.id)
+                .show(ui, |ui| {
+                    for association in &app.associations {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.strong(&association.kind);
+                            ui.label(bytes(association.bytes));
+                            pill(ui, &association.confidence, TEAL);
+                        });
+                        ui.label(short_path(&association.path))
+                            .on_hover_text(&association.path);
+                        for evidence in &association.evidence {
+                            ui.label(RichText::new(&evidence.detail).small().color(MUTED));
+                        }
+                        ui.separator();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Reveal application").clicked() {
+                        reveal = Some(app.path.clone());
+                    }
+                    if ui
+                        .add_enabled(!self.busy, egui::Button::new("Create uninstall review"))
+                        .clicked()
+                    {
+                        requested = Some(app.id.clone());
+                    }
+                });
+            });
+        }
+        if self.apps.len() > 100 {
+            ui.label("Showing the largest 100 indexed applications; the API exposes the full bounded inventory.");
+        }
+        if let Some(path) = reveal {
+            self.reveal(&path);
         }
         if let Some(id) = requested {
             self.task(move |e| Ok(Payload::Uninstall(e.uninstall_plan(&id)?)));
         }
         if let Some(review) = &self.uninstall {
-            egui::CollapsingHeader::new("Uninstall review proposal · no filesystem changes")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label(serde_json::to_string_pretty(review).unwrap_or_default());
-                });
-        }
-    }
-    fn duplicates(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .add_enabled(!self.busy, egui::Button::new("Analyze duplicate content"))
-            .clicked()
-        {
-            self.offset = 0;
-            self.task(|e| {
-                Ok(Payload::Duplicates(
-                    e.discover_duplicates(&AtomicBool::new(false))?,
-                ))
+            card().show(ui, |ui| {
+                eyebrow(ui, "Uninstall review · not executable");
+                ui.strong(
+                    review["application"]["name"]
+                        .as_str()
+                        .unwrap_or("Application"),
+                );
+                ui.label(
+                    review["reason"]
+                        .as_str()
+                        .unwrap_or("Review the observed associations. No files were changed."),
+                );
+                if let Some(id) = review["id"].as_str() {
+                    ui.horizontal(|ui| {
+                        ui.monospace(id);
+                        if ui.small_button("Copy report ID").clicked() {
+                            ui.ctx().copy_text(id.into());
+                        }
+                    });
+                }
             });
         }
+        ui.add_space(12.0);
+        ui.label(RichText::new("Bundle removal is not supported. Association evidence is not proof that shared data can be discarded.").small().color(AMBER));
+    }
+    fn duplicates(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    !self.busy,
+                    egui::Button::new("Verify duplicate content").fill(ACCENT.gamma_multiply(0.3)),
+                )
+                .clicked()
+            {
+                self.offset = 0;
+                self.duplicate_running = true;
+                self.duplicate_cancel
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let cancel = self.duplicate_cancel.clone();
+                self.task(move |e| Ok(Payload::Duplicates(e.discover_duplicates(&cancel)?)));
+            }
+            ui.label(
+                RichText::new("Size → sample → full BLAKE3 verification")
+                    .small()
+                    .color(MUTED),
+            );
+        });
+        let mut reveal = None;
         if let Some(report) = &self.duplicates {
-            ui.label(format!(
-                "{} total groups · {} files fully hashed in this run · {} warnings",
-                report.group_count,
-                report.files_hashed,
-                report.warnings.len()
-            ));
-            for g in &report.groups {
-                egui::CollapsingHeader::new(format!(
-                    "{} copies · {} each · {} potentially redundant",
-                    g.file_count,
-                    bytes(g.file_size),
-                    bytes(g.reclaimable_size)
-                ))
-                .show(ui, |ui| {
-                    for file in &g.files {
-                        ui.label(file);
-                    }
-                    ui.label(RichText::new(&g.verification).small().color(MUTED));
+            card().show(ui,|ui|{
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(format!("{} duplicate groups",report.group_count)).size(26.0).strong());
+                ui.label(format!("{} files fully hashed · {} warnings · observed {}",report.files_hashed,report.warnings.len(),age(report.analyzed_at)));
+                ui.label(RichText::new("These are observations from the last analysis, not a live guarantee. Sparse files and shared blocks affect potential physical savings. No copy is selected for deletion.").small().color(MUTED));
+            });
+            if report.groups.is_empty() {
+                empty(
+                    ui,
+                    "No groups in this report",
+                    "Run verification after indexing files. Cancellation and permission warnings may limit the report.",
+                );
+            }
+            for group in &report.groups {
+                card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let name = group
+                        .files
+                        .first()
+                        .and_then(|p| std::path::Path::new(p).file_name())
+                        .map_or_else(
+                            || "Duplicate group".into(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                    ui.strong(name);
+                    ui.horizontal_wrapped(|ui| {
+                        pill(ui, &format!("{} copies", group.file_count), ACCENT);
+                        ui.label(format!(
+                            "{} each · {} logically redundant",
+                            bytes(group.file_size),
+                            bytes(group.reclaimable_size)
+                        ));
+                    });
+                    egui::CollapsingHeader::new("Compare locations")
+                        .id_salt(&group.id)
+                        .show(ui, |ui| {
+                            for path in &group.files {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(short_path(path)).on_hover_text(path);
+                                    if ui.small_button("Reveal").clicked() {
+                                        reveal = Some(path.clone());
+                                    }
+                                });
+                            }
+                            if group.file_count > group.files.len() as u64 {
+                                ui.label(format!(
+                                    "{} paths shown of {}",
+                                    group.files.len(),
+                                    group.file_count
+                                ));
+                            }
+                            ui.label(RichText::new(&group.verification).small().color(MUTED));
+                        });
                 });
             }
-            for w in &report.warnings {
-                ui.label(format!("{}: {}", w.mechanism, w.detail));
+            for warning in &report.warnings {
+                ui.label(
+                    RichText::new(format!("{}: {}", warning.mechanism, warning.detail))
+                        .color(AMBER),
+                );
             }
+        } else if !self.queries.loading() {
+            empty(
+                ui,
+                "Verify before deciding",
+                "Content analysis runs locally and never chooses which copy should be removed.",
+            );
+        }
+        if let Some(path) = reveal {
+            self.reveal(&path);
         }
         self.pager(ui);
     }
@@ -824,141 +826,207 @@ impl App {
         }
     }
 }
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+impl App {
+    fn render(&mut self, ctx: &egui::Context) {
         self.receive();
         ctx.request_repaint_after(std::time::Duration::from_millis(if self.busy {
             150
         } else {
-            2000
+            30_000
         }));
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+            self.refresh();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
+            self.show_scan_dialog = true;
+        }
+        for (key, page) in [
+            (egui::Key::Num1, Page::Overview),
+            (egui::Key::Num2, Page::Map),
+            (egui::Key::Num3, Page::Insights),
+            (egui::Key::Num4, Page::Cleanup),
+        ] {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)) {
+                self.choose_page(page);
+            }
+        }
+        if let Some(file) = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone()))
+        {
+            self.root = file.display().to_string();
+            self.show_scan_dialog = true;
+        }
         egui::SidePanel::left("navigation")
             .exact_width(205.0)
             .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(18, 21, 32))
+                    .inner_margin(egui::Margin::symmetric(15, 20)),
+            )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 7.0;
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("stratum")
+                        .size(30.0)
+                        .strong()
+                        .color(Color32::from_rgb(227, 224, 255)),
+                );
+                eyebrow(ui, "Local machine intelligence");
                 ui.add_space(24.0);
-                ui.label(RichText::new("STRATUM").size(23.0).strong().color(TEAL));
-                ui.label(RichText::new("MACHINE INTELLIGENCE").small().color(MUTED));
-                ui.add_space(30.0);
-                for page in [
-                    Page::Overview,
-                    Page::Explorer,
-                    Page::Map,
-                    Page::Cleanup,
-                    Page::Apps,
-                    Page::Duplicates,
-                    Page::System,
-                    Page::Insights,
-                    Page::History,
-                    Page::Audit,
+                for (section, pages) in [
+                    ("WORKSPACE", &[Page::Overview, Page::Insights][..]),
+                    (
+                        "STORAGE",
+                        &[Page::Map, Page::Explorer, Page::Apps, Page::Duplicates][..],
+                    ),
+                    (
+                        "REVIEW & OBSERVE",
+                        &[Page::Cleanup, Page::History, Page::System, Page::Audit][..],
+                    ),
                 ] {
-                    let selected = self.page == page;
-                    let button =
-                        egui::Button::new(RichText::new(page.title()).color(if selected {
-                            TEAL
-                        } else {
-                            Color32::from_rgb(184, 197, 215)
-                        }))
-                        .fill(if selected {
-                            Color32::from_rgb(30, 55, 58)
-                        } else {
-                            Color32::TRANSPARENT
-                        });
-                    if ui.add_sized([180.0, 38.0], button).clicked() && !self.busy {
-                        self.page = page;
-                        self.offset = 0;
-                        self.refresh();
+                    eyebrow(ui, section);
+                    for &page in pages {
+                        let chosen = self.page == page;
+                        let button =
+                            egui::Button::new(RichText::new(page.title()).color(if chosen {
+                                Color32::WHITE
+                            } else {
+                                MUTED
+                            }))
+                            .fill(if chosen {
+                                Color32::from_rgb(57, 52, 85)
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .corner_radius(8);
+                        if ui.add_sized([174.0, 34.0], button).clicked() {
+                            self.choose_page(page);
+                        }
                     }
+                    ui.add_space(12.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("LOCAL ONLY").color(TEAL).small());
-                    ui.label(RichText::new("0.1 · No telemetry").small().color(MUTED));
+                    ui.label(
+                        RichText::new("No telemetry · no account")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                    pill(ui, "ON THIS DEVICE", TEAL);
                 });
             });
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if self.busy {
-                    ui.spinner();
-                }
-                ui.label(RichText::new(&self.status).small().color(MUTED));
-                if self.busy && ui.small_button("Cancel scan").clicked() {
-                    self.engine.cancel_all();
-                }
-            });
-        });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(18.0);
-            ui.horizontal(|ui| {
-                ui.heading(self.page.title());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("↻ Refresh"))
-                        .clicked()
-                    {
-                        self.refresh();
-                    }
-                });
-            });
-            ui.label(RichText::new(self.page.subtitle()).color(MUTED));
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.label("Scan root");
-                ui.add(egui::TextEdit::singleline(&mut self.root).desired_width(360.0));
-                if ui
-                    .add_enabled(
-                        !self.busy && !self.root.is_empty(),
-                        egui::Button::new("Index directory").fill(Color32::from_rgb(27, 86, 75)),
-                    )
-                    .clicked()
-                {
-                    let root = self.root.clone();
-                    self.task(move |e| {
-                        Ok(Payload::Scanned(e.scan(ScanRequest {
-                            roots: vec![root],
-                            ..Default::default()
-                        })?))
-                    });
-                }
-            });
-            ui.separator();
-            if let Some(error) = &self.error {
+        egui::TopBottomPanel::bottom("status")
+            .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(67, 35, 42))
-                    .corner_radius(8)
-                    .inner_margin(12)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new(error).color(Color32::LIGHT_RED));
-                    });
+                    .fill(Color32::from_rgb(18, 21, 32))
+                    .inner_margin(egui::Margin::symmetric(18, 8)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if self.busy || self.queries.loading() {
+                        ui.spinner();
+                    }
+                    ui.label(RichText::new(&self.status).small().color(MUTED));
+                    if let Some(scan) = self.active_scan.clone() {
+                        if ui
+                            .small_button(if self.paused { "Resume" } else { "Pause" })
+                            .clicked()
+                        {
+                            match self
+                                .engine
+                                .control_scan(&scan, if self.paused { "resume" } else { "pause" })
+                            {
+                                Ok(()) => self.paused = !self.paused,
+                                Err(e) => self.error = Some(e.to_string()),
+                            }
+                        }
+                        if ui.small_button("Cancel scan").clicked() {
+                            self.engine.cancel_all();
+                        }
+                    } else if self.duplicate_running && ui.small_button("Cancel hashing").clicked()
+                    {
+                        self.duplicate_cancel
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if self.queries.loading() {
+                        ui.label(RichText::new("Reading index…").small().color(ACCENT));
+                    }
+                });
+            });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(14,17,26)).inner_margin(24)).show(ctx,|ui|{
+            ui.horizontal(|ui|{
+                ui.label(RichText::new(self.page.title()).size(30.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                    if ui.add_enabled(!self.busy,egui::Button::new("Scan a location…").fill(ACCENT.gamma_multiply(0.3))).clicked(){self.show_scan_dialog=true;}
+                    if ui.button("Refresh").on_hover_text("Command/Ctrl + R").clicked(){self.refresh();}
+                });
+            });
+            ui.label(RichText::new(self.page.subtitle()).size(13.0).color(MUTED));
+            ui.add_space(18.0);
+            if let Some(error)=self.error.clone(){
+                egui::Frame::new().fill(Color32::from_rgb(60,37,43)).corner_radius(9).inner_margin(12).show(ui,|ui|{
+                    ui.horizontal_wrapped(|ui|{ui.label(RichText::new(error).color(Color32::LIGHT_RED));if ui.small_button("Dismiss").clicked(){self.error=None;}});
+                });
+                ui.add_space(10.0);
             }
-            egui::ScrollArea::vertical().show(ui, |ui| match self.page {
-                Page::Overview => self.overview(ui),
-                Page::Explorer => self.explorer(ui),
-                Page::Map => self.map(ui),
-                Page::Cleanup => self.cleanup(ui),
-                Page::Apps => self.apps(ui),
-                Page::Duplicates => self.duplicates(ui),
-                Page::System => self.system(ui),
-                Page::Insights => {
-                    if self.insights.is_empty() {
-                        ui.label("No rule findings for the current index.");
-                    }
-                    for insight in &self.insights {
-                        insight_card(ui, insight);
-                    }
+            if self.page==Page::Cleanup { self.cleanup_toolbar(ui); }
+            egui::ScrollArea::vertical().id_salt((self.page.title(),self.plan.as_ref().map(|p|p.id.as_str()),self.operation.as_ref().map(|o|o.id.as_str()))).show(ui,|ui|match self.page{
+                Page::Overview=>self.overview(ui),
+                Page::Map=>self.map(ui),
+                Page::Explorer=>self.explorer(ui),
+                Page::Cleanup=>self.cleanup(ui),
+                Page::Apps=>self.apps(ui),
+                Page::Duplicates=>self.duplicates(ui),
+                Page::System=>self.system(ui),
+                Page::Insights=>{
+                    if self.insights.is_empty() && !self.queries.loading(){empty(ui,"No findings in this scope","Scan development folders or collect more observations. No findings is not a guarantee of system health.");}
+                    let insights:Vec<_>=self.insights.iter().take(100).cloned().collect();
+                    for insight in &insights{self.actionable_insight(ui,insight,false);}
+                    if self.insights.len()>100{ui.label("Showing the 100 largest findings. The full list is available through the API.");}
                 }
-                Page::History => self.history(ui),
-                Page::Audit => {
-                    for a in &self.audit {
-                        ui.label(format!(
-                            "{} · {} · {}",
-                            a.timestamp, a.action, a.resource_id
-                        ));
-                        ui.label(RichText::new(&a.detail).small().color(MUTED));
-                        ui.separator();
-                    }
+                Page::History=>self.history(ui),
+                Page::Audit=>{
+                    if self.audit.is_empty(){empty(ui,"Your actions leave a record","Scans, plans, moves and restores will appear here.");}
+                    for record in &self.audit{card().show(ui,|ui|{
+                        ui.horizontal_wrapped(|ui|{ui.strong(record.action.replace('_'," "));ui.label(RichText::new(age(record.timestamp)).small().color(MUTED));});
+                        ui.label(RichText::new(&record.resource_id).monospace().small());
+                        egui::CollapsingHeader::new("Recorded detail").id_salt(record.id).show(ui,|ui|{ui.label(&record.detail);});
+                    });}
                 }
             });
         });
+        if self.show_scan_dialog {
+            let mut open = true;
+            egui::Window::new("Choose a scan location").open(&mut open).collapsible(false).resizable(false).default_width(570.0).show(ctx,|ui|{
+                ui.label(RichText::new("Start focused. Expand when you need to.").size(20.0).strong());
+                ui.label("Scanning reads metadata and saves a local index. It does not authorize cleanup. Previous scan exclusions are preserved when rescanning a known root.");
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui|{
+                    if ui.button("Choose folder…").clicked() && let Some(folder)=rfd::FileDialog::new().set_title("Choose a folder to index").pick_folder(){self.root=folder.display().to_string();}
+                    for folder in ["Downloads","Projects"]{if ui.button(folder).clicked(){self.root=std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(folder).display().to_string();}}
+                    if ui.button("Home").clicked(){self.root=std::env::var("HOME").unwrap_or_default();}
+                });
+                ui.add(egui::TextEdit::singleline(&mut self.root).desired_width(ui.available_width()).hint_text("Absolute folder path"));
+                if !self.indexed_roots.is_empty(){egui::ComboBox::from_id_salt("rescan-root").selected_text("Previously indexed locations").show_ui(ui,|ui|{for root in &self.indexed_roots{ui.selectable_value(&mut self.root,root.clone(),short_path(root));}});}
+                ui.label(RichText::new("macOS may restrict some folders. Warnings are recorded; Stratum does not request administrator privileges. Overlapping roots are rejected to prevent double counting.").small().color(MUTED));
+                if ui.add_enabled(!self.busy && !self.root.trim().is_empty(),egui::Button::new("Start read-only scan").fill(ACCENT.gamma_multiply(0.35))).clicked(){self.start_scan();}
+            });
+            if !open {
+                self.show_scan_dialog = false;
+            }
+        }
+    }
+}
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.render(ctx);
+    }
+}
+impl Drop for App {
+    fn drop(&mut self) {
+        self.engine.cancel_all();
+        self.duplicate_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 fn bytes(n: u64) -> String {
@@ -983,66 +1051,6 @@ fn truncate(s: &str, max: usize) -> String {
         s.into()
     }
 }
-fn insight_card(ui: &mut egui::Ui, i: &Insight) {
-    egui::Frame::new()
-        .fill(PANEL)
-        .corner_radius(10)
-        .inner_margin(14)
-        .show(ui, |ui| {
-            ui.label(RichText::new(&i.title).strong());
-            ui.label(&i.description);
-            ui.label(
-                RichText::new(format!(
-                    "{} impact · {:.0}% confidence · {} risk",
-                    bytes(i.estimated_impact),
-                    i.confidence * 100.0,
-                    i.risk
-                ))
-                .small()
-                .color(TEAL),
-            );
-            egui::CollapsingHeader::new("Evidence")
-                .id_salt(&i.id)
-                .show(ui, |ui| {
-                    for e in &i.evidence {
-                        ui.label(format!("{}: {}", e.mechanism, e.detail));
-                    }
-                });
-        });
-}
-fn treemap<'a>(items: &[&'a Entry], rect: egui::Rect, out: &mut Vec<(&'a Entry, egui::Rect)>) {
-    if items.is_empty() {
-        return;
-    }
-    if items.len() == 1 {
-        out.push((items[0], rect));
-        return;
-    }
-    let total = items.iter().map(|e| e.logical_bytes).sum::<u64>();
-    if total == 0 {
-        return;
-    }
-    let mut sum = 0;
-    let mut split = 1;
-    for (i, e) in items.iter().enumerate().take(items.len() - 1) {
-        sum += e.logical_bytes;
-        split = i + 1;
-        if sum >= total / 2 {
-            break;
-        }
-    }
-    let ratio = sum as f32 / total as f32;
-    let (mut a, mut b) = (rect, rect);
-    if rect.width() > rect.height() {
-        a.max.x = rect.min.x + rect.width() * ratio;
-        b.min.x = a.max.x;
-    } else {
-        a.max.y = rect.min.y + rect.height() * ratio;
-        b.min.y = a.max.y;
-    }
-    treemap(&items[..split], a, out);
-    treemap(&items[split..], b, out);
-}
 fn main() -> eframe::Result {
     let options = Options::parse();
     let engine = match stratum_engine::load_config(options.config.as_deref(), options.data_dir)
@@ -1063,6 +1071,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Stratum",
         native,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, engine, options.page)))),
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, engine, options.page)))),
     )
 }

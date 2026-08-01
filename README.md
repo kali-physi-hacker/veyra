@@ -6,6 +6,10 @@ This is a new **0.1 developer release**, with macOS as the primary target. See [
 
 ![Stratum desktop using a labeled synthetic fixture](docs/screenshots/overview.png)
 
+Screenshots use generated filesystem fixtures; capacity and resource cards show live host OS observations. See [onboarding](docs/screenshots/onboarding.png), [storage map](docs/screenshots/storage-map.png), and [cleanup review](docs/screenshots/cleanup.png).
+
+The desktop now offers guided first-run scanning, a file-inclusive storage map with a linked inspector, project-share findings, and a separate selection/review/restore workflow. See the [product research and UX direction](docs/product-research.md) for the rationale and commercial-readiness gates.
+
 ## Run
 
 Requires Rust 1.94 or newer, a C compiler, and macOS or Linux. Linux desktop builds also need the native packages listed in [development](docs/development.md).
@@ -31,6 +35,7 @@ Use non-overlapping roots. Once a root is indexed, rescan it instead of separate
 ```sh
 stratum files --min-size 1GiB --extension dmg --json
 stratum storage history --path /absolute/indexed/directory --json
+stratum storage breakdown /absolute/indexed/directory --json
 stratum apps inspect Example --json
 stratum apps uninstall-plan Example --json
 stratum system --json
@@ -79,5 +84,6 @@ No filenames, file contents, process data, inventory, or usage telemetry are upl
 - [MCP integration](docs/mcp-integration.md): build a thin adapter without filesystem access
 - [Development](docs/development.md): tests, fixture generation, benchmarks and release packaging
 - [Progress](docs/progress.md): validation results, limitations and next work
+- [Product research](docs/product-research.md): competitive patterns, product hypothesis and desktop direction
 
 Licensed under MIT OR Apache-2.0.
