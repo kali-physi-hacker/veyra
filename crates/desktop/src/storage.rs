@@ -1,4 +1,7 @@
 use super::*;
+use eframe::egui::{Align, Align2, CursorIcon, Layout, Rect, Sense, Stroke, StrokeKind, vec2};
+use kit::{Button, Card, Row};
+
 impl App {
     pub(super) fn browse(&mut self, path: String) {
         if self.path != path && !self.path.is_empty() {
@@ -14,25 +17,52 @@ impl App {
         self.hovered_path = None;
         self.refresh();
     }
+    /// Switch to `page` and browse `path` there in one step.
+    pub(super) fn open_location(&mut self, page: Page, path: String) {
+        if self.page != page {
+            self.page = page;
+            self.page_entered = Instant::now();
+            self.offset = 0;
+            self.has_more = false;
+            self.error = None;
+        }
+        self.browse(path);
+    }
     pub(super) fn navigation(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
         let mut target = None;
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!self.nav_back.is_empty(), egui::Button::new("Back"))
-                .clicked()
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if kit::icon_button_ex(
+                ui,
+                icons::ARROW_LEFT,
+                "Back",
+                !self.nav_back.is_empty(),
+                32.0,
+                None,
+            )
+            .clicked()
             {
                 target = self.nav_back.pop();
                 self.nav_forward.push(self.path.clone());
             }
-            if ui
-                .add_enabled(!self.nav_forward.is_empty(), egui::Button::new("Forward"))
-                .clicked()
+            if kit::icon_button_ex(
+                ui,
+                icons::ARROW_RIGHT,
+                "Forward",
+                !self.nav_forward.is_empty(),
+                32.0,
+                None,
+            )
+            .clicked()
             {
                 target = self.nav_forward.pop();
                 self.nav_back.push(self.path.clone());
             }
+            ui.add_space(6.0);
             egui::ComboBox::from_id_salt("indexed-locations")
-                .selected_text("Locations")
+                .selected_text(fonts::text("Locations", 13.0, Weight::Medium, p.text))
+                .width(132.0)
                 .show_ui(ui, |ui| {
                     for root in &self.indexed_roots {
                         if ui
@@ -43,18 +73,28 @@ impl App {
                         }
                     }
                 });
-            let ancestors: Vec<_> = std::path::Path::new(&self.path).ancestors().collect();
-            for ancestor in ancestors.iter().take(5).rev() {
-                ui.label(RichText::new("/").color(MUTED));
-                let name = ancestor
+            ui.add_space(8.0);
+            let ancestors: Vec<String> = std::path::Path::new(&self.path)
+                .ancestors()
+                .take(5)
+                .map(|a| a.display().to_string())
+                .collect();
+            let count = ancestors.len();
+            for (index, ancestor) in ancestors.iter().rev().enumerate() {
+                if index > 0 {
+                    kit::icon(ui, icons::CARET_RIGHT, 11.0, p.text_3);
+                }
+                let name = std::path::Path::new(ancestor)
                     .file_name()
-                    .map_or_else(|| "Root".into(), |s| s.to_string_lossy());
-                if ui
-                    .small_button(truncate(&name, 22))
-                    .on_hover_text(ancestor.display().to_string())
-                    .clicked()
-                {
-                    target = Some(ancestor.display().to_string());
+                    .map_or_else(|| "Root".to_string(), |s| s.to_string_lossy().into_owned());
+                let last = index + 1 == count;
+                let button = if last {
+                    Button::soft(truncate(&name, 26), p.accent).small()
+                } else {
+                    Button::ghost(truncate(&name, 22)).small()
+                };
+                if button.show(ui).on_hover_text(ancestor).clicked() && !last {
+                    target = Some(ancestor.clone());
                 }
             }
         });
@@ -67,12 +107,14 @@ impl App {
             self.selected_entry = None;
             self.refresh();
         }
-        ui.add_space(8.0);
+        ui.add_space(4.0);
     }
     pub(super) fn explorer(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
         if self.path.is_empty() {
-            empty(
+            kit::empty_state(
                 ui,
+                icons::FOLDER_OPEN,
                 "Choose an indexed location",
                 "Scan a folder first, then browse its saved index here.",
             );
@@ -80,142 +122,161 @@ impl App {
         }
         self.navigation(ui);
         let mut changed = false;
-        ui.horizontal_wrapped(|ui| {
-            for (mode, label) in [
-                (FileMode::Children, "This folder"),
-                (FileMode::Largest, "Largest files"),
-                (FileMode::Recent, "Modified this week"),
-            ] {
-                if ui.selectable_label(self.file_mode == mode, label).clicked() {
-                    self.file_mode = mode;
-                    changed = true;
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Filter names, e.g. *.zip")
-                    .desired_width(240.0),
+        ui.horizontal(|ui| {
+            changed |= kit::segmented(
+                ui,
+                egui::Id::new("file-mode"),
+                &mut self.file_mode,
+                &[
+                    (FileMode::Children, "This folder"),
+                    (FileMode::Largest, "Largest files"),
+                    (FileMode::Recent, "Modified this week"),
+                ],
             );
-            egui::ComboBox::from_id_salt("file-sort")
-                .selected_text(match self.sort.as_str() {
-                    "allocated_bytes" => "Allocated size",
-                    "modified_at" => "Last modified",
-                    "path" => "Path",
-                    _ => "Logical size",
-                })
-                .show_ui(ui, |ui| {
-                    for (value, label) in [
-                        ("logical_bytes", "Logical size"),
-                        ("allocated_bytes", "Allocated size"),
-                        ("modified_at", "Last modified"),
-                        ("path", "Path"),
-                    ] {
-                        if ui
-                            .selectable_value(&mut self.sort, value.into(), label)
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                });
-            if ui.button("Apply").clicked() {
+            ui.add_space(6.0);
+            if kit::search_field(ui, &mut self.search, "Filter names, e.g. *.zip", 250.0).changed()
+            {
                 changed = true;
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("file-sort")
+                    .selected_text(fonts::text(
+                        match self.sort.as_str() {
+                            "allocated_bytes" => "Allocated size",
+                            "modified_at" => "Last modified",
+                            "path" => "Path",
+                            _ => "Logical size",
+                        },
+                        13.0,
+                        Weight::Medium,
+                        p.text,
+                    ))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("logical_bytes", "Logical size"),
+                            ("allocated_bytes", "Allocated size"),
+                            ("modified_at", "Last modified"),
+                            ("path", "Path"),
+                        ] {
+                            if ui
+                                .selectable_value(&mut self.sort, value.into(), label)
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    });
+                kit::caption(ui, "Sort by");
+            });
         });
         if changed {
             self.offset = 0;
             self.files.clear();
             self.refresh();
         }
-        ui.add_space(6.0);
-        if self.files.is_empty() && !self.queries.loading() {
-            empty(
-                ui,
-                "No matching indexed entries",
-                "Try another filter or location. Files outside your scan scope are not included.",
-            );
-        }
-        let mut selected = None;
-        let mut navigate = None;
-        let name_width = (ui.available_width() - 330.0).max(180.0);
-        egui::Grid::new("explorer-rows")
-            .striped(true)
-            .num_columns(4)
-            .spacing([18.0, 12.0])
-            .show(ui, |ui| {
-                for label in ["NAME", "LOGICAL", "ALLOCATED", "TYPE"] {
-                    eyebrow(ui, label);
-                }
-                ui.end_row();
+        ui.add_space(2.0);
+        if self.files.is_empty() {
+            if self.queries.loading() {
+                kit::skeleton(ui, 6);
+            } else {
+                kit::empty_state(
+                    ui,
+                    icons::FUNNEL,
+                    "No matching indexed entries",
+                    "Try another filter or location. Files outside your scan scope are not included.",
+                );
+            }
+        } else {
+            let mut selected = None;
+            let mut navigate = None;
+            Card::new().padding(8.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    kit::eyebrow(ui, "Name");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        kit::eyebrow(ui, "Logical size");
+                    });
+                });
+                ui.add_space(2.0);
                 for entry in &self.files {
-                    let label = if entry.kind == EntryKind::Directory {
-                        format!("{} /", entry.name)
+                    let is_dir = entry.kind == EntryKind::Directory;
+                    let (icon, color) = if is_dir {
+                        (icons::FOLDER_SIMPLE, p.teal)
                     } else {
-                        entry.name.clone()
+                        kit::category_style(&p, &entry.category)
                     };
-                    let response = ui
-                        .add_sized(
-                            [name_width, 28.0],
-                            egui::Button::new(
-                                RichText::new(truncate(&label, (name_width / 8.0) as usize)).color(
-                                    if entry.kind == EntryKind::Directory {
-                                        ACCENT
-                                    } else {
-                                        Color32::from_rgb(224, 228, 239)
-                                    },
-                                ),
-                            )
-                            .selected(
-                                self.selected_entry
-                                    .as_ref()
-                                    .is_some_and(|e| e.path == entry.path),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text(&entry.path);
+                    let mut subtitle = format!(
+                        "{} · {} allocated",
+                        if is_dir {
+                            "Folder".to_string()
+                        } else {
+                            humanize(&entry.category)
+                        },
+                        bytes(entry.allocated_bytes)
+                    );
+                    if let Some(modified) = entry.modified_at {
+                        subtitle.push_str(&format!(" · modified {}", age(modified)));
+                    }
+                    let chosen = self
+                        .selected_entry
+                        .as_ref()
+                        .is_some_and(|e| e.path == entry.path);
+                    let mut row = Row::new(&entry.name)
+                        .icon(icon, color)
+                        .subtitle(subtitle)
+                        .trailing(bytes(entry.logical_bytes), p.text)
+                        .selected(chosen);
+                    if is_dir {
+                        row = row.chevron();
+                    } else if entry.kind != EntryKind::File {
+                        row = row.badge(entry.kind.as_str(), p.text_3);
+                    }
+                    let response = row.show(ui).on_hover_text(&entry.path);
                     if response.clicked() {
                         selected = Some(entry.clone());
                     }
-                    if response.double_clicked() && entry.kind == EntryKind::Directory {
+                    if response.double_clicked() && is_dir {
                         navigate = Some(entry.path.clone());
                     }
-                    ui.label(bytes(entry.logical_bytes));
-                    ui.label(RichText::new(bytes(entry.allocated_bytes)).color(MUTED));
-                    ui.label(entry.kind.as_str());
-                    ui.end_row();
                 }
             });
-        if let Some(entry) = selected {
-            self.selected_entry = Some(entry);
-        }
-        if let Some(path) = navigate {
-            self.browse(path);
+            if let Some(entry) = selected {
+                self.selected_entry = Some(entry);
+            }
+            if let Some(path) = navigate {
+                self.browse(path);
+            }
         }
         self.pager(ui);
         self.inspector(ui);
     }
     pub(super) fn pager(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
+        if self.offset < 100 && !self.has_more {
+            return;
+        }
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(self.offset >= 100, egui::Button::new("Previous"))
+            if Button::ghost("Previous")
+                .icon(icons::ARROW_LEFT)
+                .small()
+                .enabled(self.offset >= 100)
+                .show(ui)
                 .clicked()
             {
                 self.offset -= 100;
                 self.refresh();
             }
-            ui.label(
-                RichText::new(format!(
-                    "Page {} · up to 100 indexed entries",
-                    self.offset / 100 + 1
-                ))
-                .small()
-                .color(MUTED),
+            kit::caption(
+                ui,
+                format!("Page {} · up to 100 indexed entries", self.offset / 100 + 1),
             );
-            if ui
-                .add_enabled(self.has_more, egui::Button::new("Next"))
+            if Button::ghost("Next")
+                .icon(icons::ARROW_RIGHT)
+                .trailing()
+                .small()
+                .enabled(self.has_more)
+                .show(ui)
                 .clicked()
             {
                 self.offset += 100;
@@ -224,9 +285,11 @@ impl App {
         });
     }
     pub(super) fn map(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
         if self.path.is_empty() {
-            empty(
+            kit::empty_state(
                 ui,
+                icons::SQUARES_FOUR,
                 "Your map starts with a scan",
                 "Choose a folder. Its files and directories will both appear in the map.",
             );
@@ -234,30 +297,42 @@ impl App {
         }
         self.navigation(ui);
         let Some(breakdown) = self.breakdown.clone() else {
+            if self.queries.loading() {
+                kit::skeleton(ui, 6);
+            }
             return;
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(bytes(breakdown.children_logical_bytes))
-                    .size(26.0)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "in {} direct children · logical sizes",
-                    breakdown.child_count
-                ))
-                .color(MUTED),
-            );
-            pill(
+        ui.horizontal(|ui| {
+            kit::label(
                 ui,
-                "Click to inspect · double-click folders to open",
-                ACCENT,
+                bytes(breakdown.children_logical_bytes),
+                26.0,
+                Weight::Bold,
+                p.text,
             );
+            kit::label(
+                ui,
+                format!(
+                    "in {} direct children · logical sizes",
+                    util::count(breakdown.child_count)
+                ),
+                13.0,
+                Weight::Regular,
+                p.text_2,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                kit::badge_icon(
+                    ui,
+                    Some(icons::HAND_PALM),
+                    "Click to inspect · double-click folders to open",
+                    p.accent,
+                );
+            });
         });
         if breakdown.child_count == 0 {
-            empty(
+            kit::empty_state(
                 ui,
+                icons::FOLDER_DASHED,
                 "This indexed directory is empty",
                 "No immediate children were recorded. Permission warnings and scan exclusions can also limit what was indexed.",
             );
@@ -267,62 +342,111 @@ impl App {
         if breakdown.omitted_count > 0 {
             weights.push(breakdown.omitted_logical_bytes);
         }
+        let t = self.reveal;
         let width = ui.available_width();
+        let list_width = 300.0;
+        let map_width = (width - list_width - 16.0).max(320.0);
+        let map_height = 440.0;
         let mut selected = None;
         let mut navigate = None;
         let mut remainder = false;
         let mut hovered = None;
         ui.horizontal_top(|ui| {
-            let (rect, _) = ui.allocate_exact_size(
-                Vec2::new((width * 0.64).max(300.0), 420.0),
-                egui::Sense::hover(),
+            let (rect, _) = ui.allocate_exact_size(vec2(map_width, map_height), Sense::hover());
+            ui.painter().rect(
+                rect,
+                14.0,
+                p.sunken,
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
             );
-            ui.painter()
-                .rect_filled(rect, 12.0, Color32::from_rgb(18, 22, 33));
-            let tiles = tile_layout(&weights, rect);
+            let tiles = tile_layout(&weights, rect.shrink(5.0));
             for (index, tile) in tiles {
                 let entry = breakdown.children.get(index);
                 let is_remainder = entry.is_none();
                 let key = entry.map_or("__remainder", |e| e.path.as_str());
-                let response =
-                    ui.interact(tile.shrink(2.0), ui.id().with(key), egui::Sense::click());
-                let highlighted = response.hovered()
-                    || self.hovered_path.as_deref() == Some(key)
-                    || self.selected_entry.as_ref().is_some_and(|e| e.path == key);
-                let color = if is_remainder {
-                    MUTED
-                } else {
-                    COLORS[index % 6]
-                };
-                ui.painter().rect_filled(
-                    tile.shrink(2.0),
-                    6.0,
-                    color.gamma_multiply(if highlighted { 0.55 } else { 0.38 }),
+                let inner = tile.shrink(2.5);
+                let response = ui
+                    .interact(inner, ui.id().with(key), Sense::click())
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                let is_selected = self.selected_entry.as_ref().is_some_and(|e| e.path == key);
+                let is_hovered = response.hovered() || self.hovered_path.as_deref() == Some(key);
+                let h = ui.ctx().animate_bool_with_time(
+                    response.id.with("tile"),
+                    is_hovered || is_selected,
+                    0.14,
                 );
-                if highlighted {
-                    ui.painter().rect_stroke(
-                        tile.shrink(2.0),
-                        6.0,
-                        egui::Stroke::new(2.0, color),
-                        egui::StrokeKind::Inside,
-                    );
-                }
+                let color = if is_remainder {
+                    p.text_3
+                } else {
+                    p.series(index)
+                };
+                let drawn =
+                    Rect::from_center_size(inner.center(), inner.size() * (0.86 + 0.14 * t));
+                let painter = ui.painter();
+                painter.rect_filled(
+                    drawn,
+                    8.0,
+                    color.gamma_multiply((0.32 + 0.28 * h) * (0.35 + 0.65 * t)),
+                );
+                painter.hline(
+                    (drawn.left() + 8.0)..=(drawn.right() - 8.0),
+                    drawn.top() + 1.5,
+                    Stroke::new(1.0, Color32::from_white_alpha((28.0 + 30.0 * h) as u8)),
+                );
+                painter.rect_stroke(
+                    drawn,
+                    8.0,
+                    Stroke::new(1.0 + h, color.gamma_multiply(0.5 + 0.5 * h)),
+                    StrokeKind::Inside,
+                );
                 let name = entry.map_or_else(
                     || format!("{} other items", breakdown.omitted_count),
                     |e| e.name.clone(),
                 );
-                if tile.width() > 85.0 && tile.height() > 50.0 {
-                    ui.painter().text(
-                        tile.min + Vec2::splat(11.0),
-                        egui::Align2::LEFT_TOP,
-                        format!(
-                            "{}\n{}",
-                            truncate(&name, ((tile.width() - 22.0) / 8.0) as usize),
-                            bytes(weights[index])
-                        ),
-                        egui::FontId::proportional(13.0),
-                        Color32::WHITE,
+                if drawn.width() > 92.0 && drawn.height() > 46.0 {
+                    let glyph = match entry {
+                        Some(e) if e.kind == EntryKind::Directory => icons::FOLDER_SIMPLE,
+                        Some(_) => icons::FILE,
+                        None => icons::DOTS_THREE,
+                    };
+                    kit::paint_icon(
+                        painter,
+                        drawn.min + vec2(17.0, 16.0),
+                        glyph,
+                        14.0,
+                        Color32::from_white_alpha(230),
+                        false,
                     );
+                    let label = kit::galley_truncated(
+                        ui,
+                        &name,
+                        fonts::font(13.0, Weight::Medium),
+                        Color32::WHITE,
+                        drawn.width() - 40.0,
+                    );
+                    painter.galley(drawn.min + vec2(28.0, 8.0), label, Color32::WHITE);
+                    painter.text(
+                        drawn.min + vec2(11.0, 30.0),
+                        Align2::LEFT_TOP,
+                        bytes(weights[index]),
+                        fonts::font(12.0, Weight::Regular),
+                        Color32::from_white_alpha(200),
+                    );
+                    if drawn.height() > 76.0 {
+                        painter.text(
+                            drawn.min + vec2(11.0, 48.0),
+                            Align2::LEFT_TOP,
+                            format!(
+                                "{:.1}%",
+                                weights[index] as f64
+                                    / breakdown.children_logical_bytes.max(1) as f64
+                                    * 100.0
+                            ),
+                            fonts::font(11.0, Weight::Medium),
+                            Color32::from_white_alpha(150),
+                        );
+                    }
                 }
                 if response.hovered() {
                     hovered = Some(key.to_string());
@@ -346,53 +470,52 @@ impl App {
                     weights[index] as f64 / breakdown.children_logical_bytes.max(1) as f64 * 100.0
                 ));
             }
+            ui.add_space(12.0);
             ui.vertical(|ui| {
-                ui.set_width((width * 0.36 - 18.0).max(180.0));
-                eyebrow(ui, "Largest contributions");
+                ui.set_width(list_width);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    kit::eyebrow(ui, "Largest contributions");
+                });
                 egui::ScrollArea::vertical()
                     .id_salt("map-list")
-                    .max_height(385.0)
+                    .max_height(map_height - 26.0)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for (index, entry) in breakdown.children.iter().enumerate() {
                             let chosen = self
                                 .selected_entry
                                 .as_ref()
                                 .is_some_and(|e| e.path == entry.path);
-                            let response = ui.add_sized(
-                                [ui.available_width(), 46.0],
-                                egui::Button::new(
-                                    RichText::new(format!(
-                                        "{}{}\n{}",
-                                        truncate(&entry.name, 27),
-                                        if entry.kind == EntryKind::Directory {
-                                            " /"
-                                        } else {
-                                            ""
-                                        },
-                                        bytes(entry.logical_bytes)
-                                    ))
-                                    .color(COLORS[index % 6]),
-                                )
-                                .selected(chosen)
-                                .frame(chosen),
-                            );
+                            let is_dir = entry.kind == EntryKind::Directory;
+                            let mut row = Row::new(&entry.name)
+                                .swatch(p.series(index))
+                                .trailing(bytes(entry.logical_bytes), p.text)
+                                .height(40.0)
+                                .selected(chosen);
+                            if is_dir {
+                                row = row.chevron();
+                            }
+                            let response = row.show(ui);
                             if response.hovered() {
                                 hovered = Some(entry.path.clone());
                             }
                             if response.clicked() {
                                 selected = Some(entry.clone());
                             }
-                            if response.double_clicked() && entry.kind == EntryKind::Directory {
+                            if response.double_clicked() && is_dir {
                                 navigate = Some(entry.path.clone());
                             }
                         }
                         if breakdown.omitted_count > 0
-                            && ui
-                                .button(format!(
-                                    "{} other items\n{} · view all",
-                                    breakdown.omitted_count,
-                                    bytes(breakdown.omitted_logical_bytes)
-                                ))
+                            && Row::new(format!("{} other items", breakdown.omitted_count))
+                                .swatch(p.text_3)
+                                .subtitle("View all in the explorer")
+                                .trailing(bytes(breakdown.omitted_logical_bytes), p.text_2)
+                                .height(46.0)
+                                .chevron()
+                                .show(ui)
                                 .clicked()
                         {
                             remainder = true;
@@ -410,37 +533,147 @@ impl App {
         if remainder {
             self.choose_page(Page::Explorer);
         }
-        ui.label(RichText::new("Files and folders share the same scale. Zero-byte entries remain in the list. Physical storage may differ because of sparse files, links and APFS clones.").small().color(MUTED));
+        kit::caption(
+            ui,
+            "Files and folders share the same scale. Zero-byte entries remain in the list. Physical storage may differ because of sparse files, links and APFS clones.",
+        );
         self.inspector(ui);
     }
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
         let Some(entry) = self.selected_entry.clone() else {
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new("Select an item to see its details and classification evidence.")
-                    .color(MUTED),
+            ui.add_space(2.0);
+            kit::caption(
+                ui,
+                "Select an item to see its details and classification evidence.",
             );
             return;
         };
-        ui.add_space(12.0);
-        card().show(ui,|ui|{
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui|{eyebrow(ui,"Selected item");pill(ui,entry.kind.as_str(),ACCENT);ui.strong(&entry.name);});
-            ui.label(RichText::new(short_path(&entry.path)).monospace().small()).on_hover_text(&entry.path);
-            ui.horizontal_wrapped(|ui|{ui.label(format!("{} logical",bytes(entry.logical_bytes)));ui.label(format!("{} allocated",bytes(entry.allocated_bytes)));ui.label(format!("{} · {:.0}% classification confidence",entry.category.replace('_'," "),entry.confidence*100.0));});
-            if let Some(modified)=entry.modified_at{ui.label(RichText::new(format!("Modified {} · filesystem link count {}",age(modified),entry.identity.links)).small().color(MUTED));}
-            ui.horizontal_wrapped(|ui|{
-                if entry.kind==EntryKind::Directory && ui.button("Open folder").clicked(){self.browse(entry.path.clone());}
-                if ui.button("Reveal in Finder").clicked(){self.reveal(&entry.path);}
-                if ui.button("Copy path").clicked(){ui.ctx().copy_text(entry.path.clone());}
-                if ui.button("Close details").clicked(){self.selected_entry=None;}
+        let is_dir = entry.kind == EntryKind::Directory;
+        let (icon, color) = if is_dir {
+            (icons::FOLDER_SIMPLE, p.teal)
+        } else {
+            kit::category_style(&p, &entry.category)
+        };
+        let mut close = false;
+        let mut open = None;
+        let mut reveal = None;
+        let mut history = None;
+        Card::new().padding(18.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                kit::icon_tile(ui, icon, color, 42.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.horizontal(|ui| {
+                        kit::label(ui, &entry.name, 16.0, Weight::SemiBold, p.text);
+                        kit::badge(ui, entry.kind.as_str(), p.accent);
+                        kit::badge(ui, &humanize(&entry.category), color);
+                    });
+                    kit::mono(ui, short_path(&entry.path), 11.5)
+                        .on_hover_text(&entry.path);
+                });
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if kit::icon_button(ui, icons::X, "Close details").clicked() {
+                        close = true;
+                    }
+                });
             });
-            egui::CollapsingHeader::new("Classification evidence").id_salt(&entry.path).show(ui,|ui|{for evidence in &entry.evidence{ui.label(format!("{}: {}",evidence.mechanism,evidence.detail));}ui.label("Large or old does not mean expendable. No cleanup action is authorized by this inspector.");});
+            ui.add_space(10.0);
+            ui.columns(4, |cols| {
+                stat(&mut cols[0], "Logical", &bytes(entry.logical_bytes));
+                stat(&mut cols[1], "Allocated", &bytes(entry.allocated_bytes));
+                stat(
+                    &mut cols[2],
+                    "Classification",
+                    &format!("{:.0}% confidence", entry.confidence * 100.0),
+                );
+                stat(
+                    &mut cols[3],
+                    "Modified",
+                    &entry.modified_at.map_or_else(|| "unknown".into(), age),
+                );
+            });
+            kit::caption(
+                ui,
+                format!(
+                    "Filesystem link count {} · device {} · inode {}",
+                    entry.identity.links, entry.identity.device, entry.identity.inode
+                ),
+            );
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if is_dir
+                    && Button::new("Open folder")
+                        .icon(icons::FOLDER_OPEN)
+                        .small()
+                        .show(ui)
+                        .clicked()
+                {
+                    open = Some(entry.path.clone());
+                }
+                if Button::new("Reveal in Finder")
+                    .icon(icons::ARROW_SQUARE_OUT)
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    reveal = Some(entry.path.clone());
+                }
+                if Button::ghost("Copy path")
+                    .icon(icons::COPY)
+                    .small()
+                    .show(ui)
+                    .clicked()
+                {
+                    ui.ctx().copy_text(entry.path.clone());
+                }
+                if is_dir
+                    && Button::ghost("Storage history")
+                        .icon(icons::CHART_LINE_UP)
+                        .small()
+                        .show(ui)
+                        .clicked()
+                {
+                    history = Some(entry.path.clone());
+                }
+            });
+            kit::disclosure(ui, "Classification evidence", &entry.path, |ui| {
+                for evidence in &entry.evidence {
+                    kit::label(ui, humanize(&evidence.mechanism), 12.0, Weight::SemiBold, color);
+                    kit::label(ui, &evidence.detail, 13.0, Weight::Regular, p.text_2);
+                }
+                kit::caption(
+                    ui,
+                    "Large or old does not mean expendable. No cleanup action is authorized by this inspector.",
+                );
+            });
         });
+        if close {
+            self.selected_entry = None;
+        }
+        if let Some(path) = open {
+            self.browse(path);
+        }
+        if let Some(path) = reveal {
+            self.reveal(&path);
+        }
+        if let Some(path) = history {
+            self.open_location(Page::History, path);
+        }
     }
 }
-fn tile_layout(weights: &[u64], rect: egui::Rect) -> Vec<(usize, egui::Rect)> {
-    fn split(items: &[(usize, u64)], rect: egui::Rect, out: &mut Vec<(usize, egui::Rect)>) {
+
+fn stat(ui: &mut egui::Ui, label: &str, value: &str) {
+    let p = kit::palette(ui.ctx());
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        kit::eyebrow(ui, label);
+        kit::label(ui, value, 15.0, Weight::SemiBold, p.text);
+    });
+}
+
+pub(super) fn tile_layout(weights: &[u64], rect: Rect) -> Vec<(usize, Rect)> {
+    fn split(items: &[(usize, u64)], rect: Rect, out: &mut Vec<(usize, Rect)>) {
         if items.is_empty() {
             return;
         }
@@ -485,7 +718,7 @@ mod tests {
     use super::*;
     #[test]
     fn tiles_preserve_area_and_do_not_overlap() {
-        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 500.0));
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(800.0, 500.0));
         let weights = [70, 20, 5, 4, 1, 0];
         let tiles = tile_layout(&weights, rect);
         assert_eq!(tiles.len(), 5);
