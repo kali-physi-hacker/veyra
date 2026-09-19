@@ -3679,6 +3679,9 @@ dependencies = [
  "ratatui",
  "stratum-domain",
  "stratum-engine",
+ "tempfile",
+ "tokio",
+ "unicode-width",
 ]
 
 [[package]]

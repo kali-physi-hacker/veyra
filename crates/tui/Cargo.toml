@@ -9,5 +9,9 @@ stratum-engine.workspace = true
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
 clap.workspace = true
+tokio.workspace = true
+unicode-width = "0.2"
+[dev-dependencies]
+tempfile.workspace = true
 [lints]
 workspace = true
