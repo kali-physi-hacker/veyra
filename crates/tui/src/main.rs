@@ -1,5 +1,7 @@
 //! Stratum terminal interface: a keyboard-driven view of the local machine index.
 mod app;
+#[cfg(test)]
+mod tests;
 mod theme;
 mod ui;
 mod widgets;
