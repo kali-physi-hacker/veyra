@@ -17,7 +17,7 @@ CLI / TUI / native egui desktop / Axum HTTP adapter / future MCP
 
 `domain` owns serializable models, typed errors, configuration and events. It does not depend on HTTP, SQLite, or UI libraries. `platform` owns streaming traversal, file identity, secure file access, atomic no-clobber moves, content hashing, and measured system snapshots. `index` owns migrations, transactions, query plans, generations, history and durable journals. `engine` orchestrates domain use cases, analysis rules, duplicate verification, application associations, safety policy and incremental reconciliation.
 
-`api`, `cli`, `desktop` and `tui` only translate requests and render responses. The desktop uses native egui/eframe and the same Rust engine directly. It runs slow work on background threads. There is no second GUI backend and no JavaScript business logic. The TUI is an optional read-only inspection surface; deliberate cleanup remains in CLI, desktop and API.
+`api`, `cli`, `desktop` and `tui` only translate requests and render responses. The desktop uses native egui/eframe and the same Rust engine directly. It runs slow work on background threads. There is no second GUI backend and no JavaScript business logic. The TUI renders the same pages over the same engine, including the plan-and-approve cleanup flow with a typed phrase; it never bypasses the engine's safety checks.
 
 ## Concurrency and resource budgets
 
