@@ -104,3 +104,20 @@ Read latency improved substantially; publication still performs the one-time agg
 All 50 tests pass, along with formatting and strict all-target/all-feature Clippy. The suite includes headless desktop pointer interactions that verify no automatic first-run scan, direct-file inspection, navigation during work, disabled execution without an exact approval phrase, actual fixture quarantine after approval, and byte-preserving restore. Additional tests cover rate-normalized anomalies, nested developer findings, recent-large-file safety, rollup reconciliation and API remainder accounting.
 
 Native screenshots were inspected for onboarding, overview, map and cleanup. Native UI automation was unavailable and macOS Accessibility automation permission was absent; native file-dialog interaction and screen-reader quality remain unverified. AccessKit support is enabled, but that is not an accessibility certification. Signing/notarization, hosted CI, independent safety review and customer willingness to pay remain outstanding. Preview packaging is separate from the already-open original build; older binaries must not share an upgraded state database.
+
+## Desktop and terminal interface redesign — 2026-09-27
+
+### Implemented
+
+- Desktop: bundled Inter, JetBrains Mono and Phosphor typography and icons; dark and light palettes that follow the system appearance with a runtime toggle; a module sidebar with coloured icon tiles; gradient primary actions; a component kit of cards, badges, rows, fields, segmented controls, animated checkboxes, a step indicator, skeleton and empty states; an animated capacity ring, category stacked bars, a treemap with hover and entrance motion, system gauges and a gradient history chart; a modal scan dialog with quick-pick locations; a floating activity card with pause, resume and cancel during scans and cancel during hashing; page-entry transitions; a rasterised dock icon; and a macOS full-size content view.
+- Terminal: nine keyboard-driven pages (overview, insights, storage browser with inspector, files, applications, duplicates with verification, cleanup with plan, approval and restore, live system monitor, audit), a responsive sidebar that collapses to a tab strip, overlays for scanning, progress, roots, operations and help, a braille spinner and toasts, and truecolor and ANSI palettes.
+- Behaviour is unchanged: nothing is preselected, quarantine only happens through immutable plans with the exact typed phrase, and no scan starts automatically on either surface.
+
+### Validation
+
+- Workspace formatting, strict Clippy across all targets and features, and the test suite pass. The desktop crate has 16 tests, including headless interaction tests that render every page in both appearances; the terminal crate has 22 tests that render each page into a test backend and exercise the full cleanup flow.
+- Native window captures of every desktop page in both appearances against the synthetic fixture were inspected. Layout defects found this way, such as a non-wrapping banner that widened the page, badge collisions with long paths, and a hard edge on treemap tiles, were fixed before this record was written.
+
+### Limits
+
+- Screen-reader quality, native dialogs, signing and notarization remain unverified. The activity card during long scans and the terminal's live scan progress were exercised only through tests and short synthetic scans. Terminal glyph widths depend on the terminal's font, and ambiguous-width symbols assume single-width rendering.

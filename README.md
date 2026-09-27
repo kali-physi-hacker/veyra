@@ -6,9 +6,9 @@ This is a new **0.1 developer release**, with macOS as the primary target. See [
 
 ![Stratum desktop using a labeled synthetic fixture](docs/screenshots/overview.png)
 
-Screenshots use generated filesystem fixtures; capacity and resource cards show live host OS observations. See [onboarding](docs/screenshots/onboarding.png), [storage map](docs/screenshots/storage-map.png), and [cleanup review](docs/screenshots/cleanup.png).
+Screenshots use generated filesystem fixtures; capacity and resource cards show live host OS observations. See [onboarding](docs/screenshots/onboarding.png), [storage map](docs/screenshots/storage-map.png), [cleanup review](docs/screenshots/cleanup.png), the [scan dialog](docs/screenshots/scan-dialog.png) in the light appearance, the [system monitor](docs/screenshots/system.png) and the [terminal interface](docs/screenshots/terminal.png).
 
-The desktop now offers guided first-run scanning, a file-inclusive storage map with a linked inspector, project-share findings, and a separate selection/review/restore workflow. See the [product research and UX direction](docs/product-research.md) for the rationale and commercial-readiness gates.
+The desktop is a native application with a module sidebar, bundled Inter and JetBrains Mono typography, Phosphor icons, and dark or light appearances that follow the system. Capacity rings, category bars, the treemap and the history chart animate into place; findings link to their evidence; the scan dialog offers quick-pick locations; and a floating activity card exposes pause, resume and cancel during long work. The terminal interface (`stratum-tui`) covers the same nine pages with keyboard navigation, live scan progress, duplicate verification and the full plan-and-approve cleanup flow. Nothing is preselected on either surface, quarantine stays reversible, and no scan starts without an explicit request. See the [product research and UX direction](docs/product-research.md) for the rationale and commercial-readiness gates.
 
 ## Run
 
@@ -26,7 +26,7 @@ cargo build --release --workspace
 ./target/release/stratum-tui
 ```
 
-Scan your home with `stratum scan "$HOME"`, or a volume with `stratum scan /Volumes/Example`. `scan --full` requests `/` with mount boundaries preserved by default. Permission failures produce a partial scan and recorded warnings. macOS privacy controls may require Full Disk Access for the terminal/application. No privilege elevation is attempted.
+`stratum-desktop --appearance dark|light` overrides the system appearance and `--page map` opens a specific page; `stratum-tui --palette ansi` limits the terminal interface to sixteen colours. Scan your home with `stratum scan "$HOME"`, or a volume with `stratum scan /Volumes/Example`. `scan --full` requests `/` with mount boundaries preserved by default. Permission failures produce a partial scan and recorded warnings. macOS privacy controls may require Full Disk Access for the terminal/application. No privilege elevation is attempted.
 
 Use non-overlapping roots. Once a root is indexed, rescan it instead of separately indexing a child. Each run persists its index in a dedicated private data directory, by default `~/.local/share/stratum`. Queries work after restarting without another scan. Use `--data-dir /absolute/dedicated/path`, `STRATUM_DATA_DIR`, or `--config config.toml` to select another instance.
 
