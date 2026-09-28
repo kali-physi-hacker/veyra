@@ -236,6 +236,9 @@ pub struct ScanState {
     pub warnings: u64,
     pub last_path: String,
     pub paused: bool,
+    /// The running scan replaces a saved index, which stays visible until it finishes.
+    pub rescan: bool,
+    last_refresh: Option<Instant>,
 }
 impl ScanState {
     pub fn active(&self) -> bool {
@@ -352,6 +355,8 @@ pub struct App {
 }
 impl App {
     pub fn new(engine: Arc<Engine>, theme: Theme) -> Self {
+        // Pages read each root's visible generation, so a first scan fills them as it runs.
+        engine.set_live_view(true);
         let (tx, rx) = mpsc::channel();
         let events = engine.subscribe();
         let roots = engine.roots().unwrap_or_default();
@@ -602,14 +607,33 @@ impl App {
             match self.events.try_recv() {
                 Ok(OperationEvent::ScanStarted { scan_id, root }) => {
                     self.scan.id = Some(scan_id);
+                    self.scan.rescan = self.roots.contains(&root);
+                    if !self.scan.rescan {
+                        self.roots.push(root.clone());
+                        if self.path.is_empty() {
+                            self.path = root.clone();
+                        }
+                    }
                     if self.scan.root.is_empty() {
                         self.scan.root = root;
                     }
+                    self.scan.last_refresh = Some(Instant::now());
+                    self.refresh();
                     changed = true;
                 }
                 Ok(OperationEvent::ScanProgress { entries, bytes, .. }) => {
                     self.scan.entries = entries;
                     self.scan.bytes = bytes;
+                    // A first scan is readable as it runs; keep the open page current.
+                    if !self.scan.rescan
+                        && self
+                            .scan
+                            .last_refresh
+                            .is_none_or(|t| t.elapsed() >= Duration::from_millis(900))
+                    {
+                        self.scan.last_refresh = Some(Instant::now());
+                        self.refresh();
+                    }
                     changed = true;
                 }
                 Ok(OperationEvent::PathIndexed { path, .. }) => {
@@ -622,6 +646,15 @@ impl App {
                 Ok(OperationEvent::ScanCompleted { scan }) => {
                     self.scan.entries = scan.entries;
                     self.scan.warnings = scan.warnings;
+                    // A first scan that did not publish leaves nothing to browse.
+                    if !self.scan.rescan && !matches!(scan.status.as_str(), "completed" | "partial")
+                    {
+                        self.roots.retain(|r| *r != scan.root);
+                        if self.path == scan.root {
+                            self.path.clear();
+                            self.breakdown = None;
+                        }
+                    }
                     changed = true;
                 }
                 Ok(_) => {}

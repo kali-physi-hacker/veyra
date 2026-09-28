@@ -232,6 +232,9 @@ struct App {
     scan_started: Option<Instant>,
     scan_entries: u64,
     scan_bytes: u64,
+    /// The running scan replaces a saved index, which stays visible until it finishes.
+    rescanning: bool,
+    last_live_refresh: Instant,
     paused: bool,
     duplicate_cancel: Arc<AtomicBool>,
     duplicate_running: bool,
@@ -260,6 +263,8 @@ impl App {
         kit::set_palette(ctx, palette);
         let (tx, rx) = mpsc::channel();
         let events = engine.subscribe();
+        // Pages read each root's visible generation, so a first scan fills them as it runs.
+        engine.set_live_view(true);
         let indexed_roots = engine.roots().unwrap_or_default();
         let indexed_root = indexed_roots.first().cloned();
         let root = indexed_root
@@ -315,6 +320,8 @@ impl App {
             scan_started: None,
             scan_entries: 0,
             scan_bytes: 0,
+            rescanning: false,
+            last_live_refresh: Instant::now(),
             paused: false,
             duplicate_cancel: Arc::new(AtomicBool::new(false)),
             duplicate_running: false,
@@ -455,10 +462,19 @@ impl App {
     fn receive(&mut self) {
         for _ in 0..1024 {
             match self.events.try_recv() {
-                Ok(OperationEvent::ScanStarted { scan_id, .. }) => {
+                Ok(OperationEvent::ScanStarted { scan_id, root }) => {
                     self.active_scan = Some(scan_id);
                     self.scan_entries = 0;
                     self.scan_bytes = 0;
+                    self.rescanning = self.indexed_roots.contains(&root);
+                    if !self.rescanning {
+                        self.indexed_roots.push(root.clone());
+                        if self.path.is_empty() {
+                            self.path = root;
+                        }
+                    }
+                    self.last_live_refresh = Instant::now();
+                    self.refresh();
                 }
                 Ok(OperationEvent::ScanProgress {
                     scan_id,
@@ -478,10 +494,27 @@ impl App {
                                 .map_or(0, |t| t.elapsed().as_secs() as i64)
                         )
                     );
+                    // A first scan is readable as it runs; keep the open page current.
+                    if !self.rescanning
+                        && self.last_live_refresh.elapsed() >= std::time::Duration::from_millis(900)
+                    {
+                        self.last_live_refresh = Instant::now();
+                        self.refresh();
+                    }
                 }
                 Ok(OperationEvent::ScanCompleted { scan }) => {
                     self.active_scan = None;
                     self.paused = false;
+                    // A first scan that did not publish leaves nothing to browse.
+                    if !self.rescanning && !matches!(scan.status.as_str(), "completed" | "partial")
+                    {
+                        self.indexed_roots.retain(|r| *r != scan.root);
+                        if self.path == scan.root {
+                            self.path.clear();
+                            self.breakdown = None;
+                            self.files.clear();
+                        }
+                    }
                     self.status = format!(
                         "Scan {} · {} entries · {} warnings",
                         scan.status,
@@ -508,6 +541,7 @@ impl App {
                     self.duplicate_running = false;
                     self.active_scan = None;
                     self.scan_started = None;
+                    self.rescanning = false;
                     result
                 }
             };
@@ -598,6 +632,11 @@ impl App {
         self.has_more = false;
         self.error = None;
         self.refresh();
+    }
+    /// Browse a saved index without scanning it again.
+    fn open_indexed(&mut self, root: String) {
+        self.show_scan_dialog = false;
+        self.open_location(Page::Map, root);
     }
     fn start_scan(&mut self) {
         if self.busy || self.root.trim().is_empty() {

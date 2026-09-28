@@ -26,7 +26,7 @@ cargo build --release --workspace
 ./target/release/stratum-tui
 ```
 
-`stratum-desktop --appearance dark|light` overrides the system appearance and `--page map` opens a specific page; `stratum-tui --palette ansi` limits the terminal interface to sixteen colours. Scan your home with `stratum scan "$HOME"`, or a volume with `stratum scan /Volumes/Example`. `scan --full` requests `/` with mount boundaries preserved by default. Permission failures produce a partial scan and recorded warnings. macOS privacy controls may require Full Disk Access for the terminal/application. No privilege elevation is attempted.
+The first scan of a location fills every page while it runs; opening a saved index never rescans, and rescanning keeps the saved index in view until the new one is published. `stratum-desktop --appearance dark|light` overrides the system appearance and `--page map` opens a specific page; `stratum-tui --palette ansi` limits the terminal interface to sixteen colours. Scan your home with `stratum scan "$HOME"`, or a volume with `stratum scan /Volumes/Example`. `scan --full` requests `/` with mount boundaries preserved by default. Permission failures produce a partial scan and recorded warnings. macOS privacy controls may require Full Disk Access for the terminal/application. No privilege elevation is attempted.
 
 Use non-overlapping roots. Once a root is indexed, rescan it instead of separately indexing a child. Each run persists its index in a dedicated private data directory, by default `~/.local/share/stratum`. Queries work after restarting without another scan. Use `--data-dir /absolute/dedicated/path`, `STRATUM_DATA_DIR`, or `--config config.toml` to select another instance.
 

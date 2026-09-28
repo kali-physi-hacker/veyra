@@ -248,6 +248,18 @@ impl App {
                 ui.spacing_mut().item_spacing.y = 3.0;
                 kit::heading(ui, self.page.title());
                 kit::label(ui, self.page.subtitle(), 13.0, Weight::Regular, p.text_2);
+                if self.active_scan.is_some() {
+                    kit::badge_icon(
+                        ui,
+                        Some(icons::BROADCAST),
+                        if self.rescanning {
+                            "Rescanning · saved index shown until it finishes"
+                        } else {
+                            "Scanning · results are live"
+                        },
+                        p.teal,
+                    );
+                }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let scan = Button::primary("Scan a location")
@@ -285,6 +297,8 @@ impl App {
                 spread: 0,
                 color: p.shadow,
             });
+        let mut open: Option<String> = None;
+        let mut rescan = false;
         let modal = egui::Modal::new(Id::new("scan-modal"))
             .frame(frame)
             .backdrop_color(Color32::from_black_alpha(if p.dark { 150 } else { 70 }))
@@ -364,19 +378,36 @@ impl App {
                     true,
                 );
                 if !self.indexed_roots.is_empty() {
-                    kit::eyebrow(ui, "Previously indexed");
-                    ui.horizontal_wrapped(|ui| {
-                        for root in self.indexed_roots.clone() {
-                            if Button::soft(truncate_middle(&short_path(&root), 56), p.teal)
-                                .icon(icons::CLOCK_COUNTER_CLOCKWISE)
+                    kit::eyebrow(ui, "Saved indexes");
+                    kit::caption(
+                        ui,
+                        "Open one instantly from its saved index. Rescan only when you want fresh numbers.",
+                    );
+                    for root in self.indexed_roots.clone() {
+                        ui.horizontal(|ui| {
+                            if Button::soft(truncate_middle(&short_path(&root), 50), p.teal)
+                                .icon(icons::FOLDER_OPEN)
                                 .small()
                                 .show(ui)
+                                .on_hover_text("Open the saved index without scanning")
                                 .clicked()
                             {
-                                self.root = root;
+                                open = Some(root.clone());
                             }
-                        }
-                    });
+                            if Button::ghost("Rescan")
+                                .icon(icons::ARROWS_CLOCKWISE)
+                                .small()
+                                .show(ui)
+                                .on_hover_text(
+                                    "Index this folder again; the saved index stays until it finishes",
+                                )
+                                .clicked()
+                            {
+                                self.root = root.clone();
+                                rescan = true;
+                            }
+                        });
+                    }
                 }
                 kit::caption(
                     ui,
@@ -402,6 +433,11 @@ impl App {
             });
         if modal.should_close() {
             self.show_scan_dialog = false;
+        }
+        if let Some(root) = open {
+            self.open_indexed(root);
+        } else if rescan {
+            self.start_scan();
         }
     }
     pub(super) fn activity_card(&mut self, ctx: &egui::Context) {
@@ -445,6 +481,14 @@ impl App {
                     });
                     if self.activity == Activity::Scan {
                         indeterminate_bar(ui, p.accent, !self.paused);
+                        kit::caption(
+                            ui,
+                            if self.rescanning {
+                                "Your saved index stays available until this scan finishes."
+                            } else {
+                                "Results appear on every page as the scan runs."
+                            },
+                        );
                         ui.horizontal(|ui| {
                             if let Some(scan) = self.active_scan.clone() {
                                 let (label, icon) = if self.paused {

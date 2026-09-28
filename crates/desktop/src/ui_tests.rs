@@ -253,3 +253,50 @@ fn scan_modal_opens_with_shortcut_and_closes_without_scanning() {
     assert!(!app.show_scan_dialog);
     assert!(engine.scans().unwrap().is_empty());
 }
+
+#[test]
+fn saved_index_opens_from_the_scan_dialog_without_scanning_again() {
+    let (temp, engine) = fixture_engine();
+    let root = temp.path().join("fixture");
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/notes.txt"), "saved").unwrap();
+    engine
+        .scan(ScanRequest {
+            roots: vec![root.display().to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    let scans_before = engine.scans().unwrap().len();
+    let ctx = egui::Context::default();
+    let mut app = App::new(&ctx, engine.clone(), Page::Overview);
+    settle(&mut app);
+    app.show_scan_dialog = true;
+    // The modal lays itself out on one frame and paints on the next.
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let root_text = std::fs::canonicalize(&root).unwrap().display().to_string();
+    // The modal paints after the page, so its chip is the last text with this label.
+    let label = truncate_middle(&short_path(&root_text), 50);
+    let chip = text
+        .iter()
+        .rfind(|(t, _)| *t == label)
+        .map(|(_, pos)| *pos)
+        .unwrap_or_else(|| panic!("the saved index {label:?} is listed in the dialog: {text:?}"));
+    click(&mut app, &ctx, chip);
+    settle(&mut app);
+    assert!(
+        !app.show_scan_dialog,
+        "opening a saved index closes the dialog"
+    );
+    assert_eq!(app.page, Page::Map);
+    assert_eq!(app.path, root_text);
+    assert_eq!(
+        engine.scans().unwrap().len(),
+        scans_before,
+        "no scan started"
+    );
+    assert!(
+        app.breakdown.is_some(),
+        "the saved index is browsed immediately"
+    );
+}

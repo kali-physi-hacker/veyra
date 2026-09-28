@@ -121,3 +121,34 @@ Native screenshots were inspected for onboarding, overview, map and cleanup. Nat
 ### Limits
 
 - Screen-reader quality, native dialogs, signing and notarization remain unverified. The activity card during long scans and the terminal's live scan progress were exercised only through tests and short synthetic scans. Terminal glyph widths depend on the terminal's font, and ambiguous-width symbols assume single-width rendering.
+
+## Scanner throughput, live results and the saved index — 2026-09-27
+
+### Implemented
+
+- Traversal: a pool of directory-listing workers (up to eight by default, `scan_threads` overrides) feeds one coordinator that owns the open part of the tree, emits every directory after its descendants with final totals, and republishes the running totals of still-open directories every 400 ms as provisional rows. Worker reports and the index queue are bounded, and pause and cancel still act per directory.
+- Index: entries are stored as columns; the JSON copy of every row, which repeated the path three times, is gone. A pool of reader connections sits beside the single writer, so a page never waits for a batch. Secondary indexes are partial over published rows, so a running scan touches only the primary key; publication drops and rebuilds the five indexes in sorted passes, removes the previous generation with a range delete and packs the pages. Bulk mode (no flush per commit, a larger page cache, rare checkpoints) applies only while the scan holds the writer lock. New databases use 16 KB pages; batches commit at 20,000 rows or after one second.
+- Visible generation: `Engine::set_live_view` makes a root's first scan readable while it runs; published generations answer from their indexes and the running one from primary-key ranges, merged into one ordering. A rescan keeps the published generation visible until it publishes. The desktop and terminal enable it, refresh the open page as batches land, show a live badge, and open saved indexes from the scan dialog without scanning; rescanning is a separate action.
+- Derived views (overview, insights, applications) are cached against an index version that every write advances, and the developer-storage rule became one query. Progress events follow each batch, per-path events are 100 ms samples, and completion is announced before the checkpoint that ends bulk mode.
+
+### Measurements
+
+Same M2 Max, APFS at 99 % capacity, other applications running. Single runs, not distributions. The real tree is `~/development/personal`: about 530,000 entries and 21 GB logical.
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| First scan, wall time | 202.05 s | 14.25 s (streaming 8.4 s, publication 5.2 s) |
+| Rescan of the same root | 123.77 s (measured midway, with columns and bulk mode already in) | 17.98 s (10.7 s, 7.1 s) |
+| Index file after the first scan | 3,304,284,160 bytes, 1.5 GB of it empty page space | 750,616,576 bytes |
+| Traversal alone, one thread | 12.55 s (`find -type f`: 11.98 s) | 3.32 s with eight workers; 4.52 s with four |
+| Largest-directory query | 1.5 ms | unchanged class, under 10 ms |
+
+Steps along the way, first scan: columns, reader pool and bulk mode 94.08 s; partial indexes updated row by row 28.70 s but 82.07 s for a rescan; rebuilding the indexes at publication 22.95 s and 23.18 s; 16 KB pages and five indexes 14.25 s and 17.98 s.
+
+### Limits
+
+- What remains is roughly half streaming inserts, about 60,000 rows per second into the primary key, and half the index rebuild; the traversal is three seconds of it. Metadata is one `lstat` per entry; macOS bulk attribute calls would need foreign calls the workspace forbids.
+- A rescan holds two generations for a moment. Freed pages are reused rather than returned, so the file settles near one generation plus slack and is never shrunk.
+- Sorting by allocated bytes and filtering by category now sort or filter through the size index; both are rare and slower on large indexes.
+- Live results cover a root's first scan; a rescan stays behind the saved index until it publishes. The API and CLI keep the published view unless a client opts in.
+- Migration 5 drops the entries of earlier releases rather than converting them: an in-place conversion of a multi-gigabyte index needs more free space than the index itself and hours of rewriting. Scan records, history, plans, operations and audit records survive; each location must be rescanned once, and the store vacuums the file so the space returns to the disk.

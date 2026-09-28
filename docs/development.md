@@ -34,6 +34,14 @@ The `index_scale` benchmark streams synthetic metadata in 1,000-entry batches to
 
 The benchmark also reports category-query and intelligence-rule latency.
 
+## Scanning
+
+`scan_threads` (0 chooses from the core count, capped at eight; up to 64) sets the directory-listing workers; `batch_size` (4,000) caps a write batch, and a batch also flushes after 250 ms so progress reaches pages steadily. `cargo run --release -p stratum-platform --example walk -- DIR` times the traversal alone and prints entry, directory and provisional counts; `STRATUM_SCAN_THREADS=n` overrides the workers for that run.
+
+Readers never wait for the writer: `Store` keeps a pool of read connections beside the single writer. The desktop and terminal call `Engine::set_live_view(true)`, so a root's first scan is readable while it runs and their pages refresh as batches land; a rescan keeps the published generation visible until it publishes. The API and CLI keep the published view. `Engine::cached` memoises derived views against `Store::version`, which every write bumps.
+
+Opening a state directory written by a release before schema version 5 drops its indexed entries (not its scan records, history, plans, operations or audit log), vacuums the file and records `index_format_changed` in the audit log; scan each location again.
+
 ## Desktop interface
 
 The desktop crate is a native egui application. `theme.rs` defines the dark and light palettes and restyles egui's built-in widgets; `fonts.rs` embeds Inter at four weights, JetBrains Mono and the Phosphor icon fonts from `crates/desktop/assets/fonts` (the SIL OFL and MIT licences sit beside the files); `icons.rs` lists the Phosphor codepoints in use; `kit.rs` holds the component kit (cards, gradient buttons, badges, rings, rows, fields, segmented controls, animated checkboxes, steps, skeletons, banners, disclosure headers) plus the entrance and hover motion helpers; `shell.rs` renders the sidebar, header, scan modal and floating activity card; `brand.rs` paints the mark and rasterises the dock icon; each page lives in its own module. Widgets read the active palette from egui memory, so pages never pass colours around.

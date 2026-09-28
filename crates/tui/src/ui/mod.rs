@@ -563,7 +563,11 @@ fn render_progress(frame: &mut Frame, app: &App, area: Rect) {
                 },
             ),
             Span::styled(
-                "  ·  results publish only when the scan finishes",
+                if app.scan.rescan {
+                    "  ·  saved index stays until this finishes"
+                } else {
+                    "  ·  results are live on every page"
+                },
                 theme.faint(),
             ),
         ]),
