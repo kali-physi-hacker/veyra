@@ -678,3 +678,128 @@ fn failed_scan_does_not_replace_published_policy() {
         before.ignore_patterns
     );
 }
+
+#[test]
+fn live_view_shows_a_first_scan_while_it_runs_and_keeps_published_data_during_rescans() {
+    let f = Fixture::new();
+    f.engine.set_live_view(true);
+    let store = f.store();
+    let root = f.root.to_string_lossy().to_string();
+    let running = ScanRecord {
+        id: id(),
+        root: root.clone(),
+        started_at: now(),
+        completed_at: None,
+        status: "running".into(),
+        entries: 0,
+        warnings: 0,
+        excluded: 0,
+        logical_bytes: 0,
+        allocated_bytes: 0,
+        freshness: "unknown".into(),
+    };
+    store.begin_scan(&running).unwrap();
+    let entry =
+        stratum_platform::scanner::read_entry(&f.root.join("project/Cargo.toml"), 2).unwrap();
+    store.insert_batch(&running.id, &[entry]).unwrap();
+    assert_eq!(
+        f.engine.files(&FileQuery::default()).unwrap().items.len(),
+        1
+    );
+    assert_eq!(f.engine.coverage().unwrap()[0].status, "running");
+    let mut cancelled = running.clone();
+    cancelled.status = "cancelled".into();
+    cancelled.completed_at = Some(now());
+    store.finish_scan(&cancelled, 30).unwrap();
+    assert!(
+        f.engine
+            .files(&FileQuery::default())
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    f.scan();
+    let published = f.engine.files(&FileQuery::default()).unwrap().items.len();
+    assert!(published > 1);
+    let rescan = ScanRecord {
+        id: id(),
+        ..running
+    };
+    store.begin_scan(&rescan).unwrap();
+    store
+        .insert_batch(
+            &rescan.id,
+            &[
+                stratum_platform::scanner::read_entry(&f.root.join("project/Cargo.toml"), 2)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        f.engine.files(&FileQuery::default()).unwrap().items.len(),
+        published,
+        "a rescan stays invisible until it publishes"
+    );
+    assert_eq!(f.engine.coverage().unwrap()[0].status, "completed");
+}
+
+#[test]
+fn derived_views_are_cached_until_the_index_changes() {
+    let f = Fixture::new();
+    f.scan();
+    let first = f.engine.explain_storage().unwrap();
+    let again = f.engine.explain_storage().unwrap();
+    assert_eq!(
+        serde_json::to_string(&first.insights).unwrap(),
+        serde_json::to_string(&again.insights).unwrap()
+    );
+    assert_eq!(
+        first.largest_directories.len(),
+        again.largest_directories.len()
+    );
+    fs::write(f.root.join("project/target/debug/second"), vec![7; 4096]).unwrap();
+    f.scan();
+    let after = f.engine.explain_storage().unwrap();
+    assert_eq!(
+        after.largest_directories[0].logical_bytes,
+        first.largest_directories[0].logical_bytes + 4096
+    );
+}
+
+#[test]
+fn scans_stream_progress_and_directory_totals_match_their_files() {
+    let f = Fixture::new();
+    let mut events = f.engine.subscribe();
+    let records = f.scan();
+    assert_eq!(records[0].status, "completed");
+    let (mut progress, mut completed) = (0, false);
+    while let Ok(event) = events.try_recv() {
+        match event {
+            OperationEvent::ScanProgress { .. } => progress += 1,
+            OperationEvent::ScanCompleted { .. } => completed = true,
+            _ => {}
+        }
+    }
+    assert!(progress >= 1 && completed);
+    let files: u64 = f
+        .engine
+        .files(&FileQuery {
+            kind: Some("file".into()),
+            limit: 1000,
+            ..Default::default()
+        })
+        .unwrap()
+        .items
+        .iter()
+        .map(|e| e.logical_bytes)
+        .sum();
+    assert!(files > 0);
+    let root = f.engine.inspect_entry(f.root.to_str().unwrap()).unwrap();
+    let project = f
+        .engine
+        .inspect_entry(f.root.join("project").to_str().unwrap())
+        .unwrap();
+    assert_eq!(root.logical_bytes, files);
+    assert_eq!(project.logical_bytes, files);
+    assert_eq!(records[0].entries, 6);
+}

@@ -5,7 +5,9 @@ exclusions = []
 protected_paths = ["/Users/example/Projects/important"]
 allowed_cleanup_roots = ["/Users/example/Projects"]
 scan_queue_capacity = 512
-batch_size = 1000
+batch_size = 20000
+# Directory-listing threads for scans; 0 picks a count from the machine's cores.
+scan_threads = 0
 history_retention_days = 90
 monitoring_interval_seconds = 10
 reconciliation_seconds = 3600

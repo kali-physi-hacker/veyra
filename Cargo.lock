@@ -3665,6 +3665,7 @@ dependencies = [
  "blake3",
  "globset",
  "rustix 1.1.5",
+ "serde_json",
  "stratum-domain",
  "sysinfo",
  "tempfile",

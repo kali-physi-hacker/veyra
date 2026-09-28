@@ -79,21 +79,23 @@ impl CleanupRule for RegeneratableRule {
 use crate::analysis_rules::{DeveloperRule, GrowthRule, RecentLargeRule};
 impl Engine {
     pub fn insights(&self) -> Result<Vec<Insight>> {
-        let ctx = AnalysisContext {
-            engine: self,
-            observed_at: now(),
-        };
-        let rules: Vec<Box<dyn AnalysisRule>> = vec![
-            Box::new(DeveloperRule),
-            Box::new(GrowthRule),
-            Box::new(RecentLargeRule),
-        ];
-        let mut insights = vec![];
-        for rule in rules {
-            insights.extend(rule.analyze(&ctx)?);
-        }
-        insights.sort_by_key(|i| std::cmp::Reverse(i.estimated_impact));
-        Ok(insights)
+        self.cached("insights", || {
+            let ctx = AnalysisContext {
+                engine: self,
+                observed_at: now(),
+            };
+            let rules: Vec<Box<dyn AnalysisRule>> = vec![
+                Box::new(DeveloperRule),
+                Box::new(GrowthRule),
+                Box::new(RecentLargeRule),
+            ];
+            let mut insights = vec![];
+            for rule in rules {
+                insights.extend(rule.analyze(&ctx)?);
+            }
+            insights.sort_by_key(|i| std::cmp::Reverse(i.estimated_impact));
+            Ok(insights)
+        })
     }
     pub fn cleanup_candidates(&self, query: &FileQuery) -> Result<Page<CleanupCandidate>> {
         let rule = RegeneratableRule;

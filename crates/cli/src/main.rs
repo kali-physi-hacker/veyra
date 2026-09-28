@@ -218,6 +218,7 @@ impl QueryArgs {
             path: self.path,
             parent: self.parent,
             name: self.name,
+            names: vec![],
             extension: self.extension,
             category: self.category,
             min_size: self.min_size,
@@ -312,7 +313,11 @@ async fn main() {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(if cli.verbose { "stratum=debug" } else { "warn" })
+        .with_env_filter(if cli.verbose {
+            "stratum=debug,stratum_engine=debug,stratum_index=debug,stratum_platform=debug"
+        } else {
+            "warn"
+        })
         .init();
     let json = cli.json;
     match run(cli).await {

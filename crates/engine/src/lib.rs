@@ -8,10 +8,12 @@ pub mod incremental;
 pub mod intelligence;
 pub mod jobs;
 use std::{
+    any::Any,
     collections::HashMap,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
+    time::{Duration, Instant},
 };
 pub use stratum_domain as domain;
 use stratum_domain::*;
@@ -19,23 +21,45 @@ use stratum_index::Store;
 use stratum_platform::scanner::{self, ScanControl, ScanMessage};
 use tokio::sync::broadcast;
 
+/// How long a scan batch may wait before it is written, so pages reading the visible
+/// generation see progress at a steady pace even while the batch is far from full.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(1000);
+/// Per-path events are samples, not a log of every entry.
+const PATH_EVENT_INTERVAL: Duration = Duration::from_millis(100);
+
+type Cached = (u64, Arc<dyn Any + Send + Sync>);
+
 pub struct Engine {
     pub config: Config,
     pub(crate) store: Store,
     events: broadcast::Sender<OperationEvent>,
     controls: Mutex<HashMap<String, ScanControl>>,
+    /// Derived views keyed by the index version they were computed from.
+    cache: Mutex<HashMap<&'static str, Cached>>,
     pub(crate) watcher_running: std::sync::atomic::AtomicBool,
+}
+/// Restores full durability when a scan ends, however it ends.
+struct Bulk<'a>(&'a Store);
+impl Drop for Bulk<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.0.set_bulk(false) {
+            tracing::error!(error=%e,"Failed to leave bulk mode");
+        }
+    }
 }
 impl Engine {
     pub fn open(mut config: Config) -> Result<Arc<Self>> {
         if config.batch_size == 0
-            || config.batch_size > 10000
+            || config.batch_size > 200_000
             || config.scan_queue_capacity == 0
             || config.scan_queue_capacity > 10000
         {
             return Err(Error::invalid(
-                "Batch and queue capacities must be 1..10000",
+                "batch_size must be 1..200000 and scan_queue_capacity 1..10000",
             ));
+        }
+        if config.scan_threads > 64 {
+            return Err(Error::invalid("scan_threads must be 0..64"));
         }
         if config.monitoring_interval_seconds < 1 || config.reconciliation_seconds < 5 {
             return Err(Error::invalid(
@@ -79,6 +103,7 @@ impl Engine {
             store,
             events,
             controls: Mutex::new(HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
             watcher_running: std::sync::atomic::AtomicBool::new(false),
         });
         if let Ok(_guard) = engine.writer_lock() {
@@ -117,6 +142,35 @@ impl Engine {
     pub fn subscribe(&self) -> broadcast::Receiver<OperationEvent> {
         self.events.subscribe()
     }
+    /// Read each root's visible generation: a first scan while it runs, otherwise the
+    /// published index. Rescans stay invisible until they publish. Interfaces that show
+    /// progress as it happens opt in; the API and CLI keep the published view.
+    pub fn set_live_view(&self, on: bool) {
+        self.store.set_live_view(on);
+    }
+    pub fn live_view(&self) -> bool {
+        self.store.live_view()
+    }
+    /// A derived view, recomputed only after the index changes.
+    pub(crate) fn cached<T: Clone + Send + Sync + 'static>(
+        &self,
+        key: &'static str,
+        compute: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let version = self.store.version();
+        if let Ok(cache) = self.cache.lock()
+            && let Some((cached_version, value)) = cache.get(key)
+            && *cached_version == version
+            && let Some(value) = value.downcast_ref::<T>()
+        {
+            return Ok(value.clone());
+        }
+        let value = compute()?;
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, (version, Arc::new(value.clone())));
+        }
+        Ok(value)
+    }
     pub fn watcher_running(&self) -> bool {
         self.watcher_running
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -137,6 +191,8 @@ impl Engine {
     }
     pub fn scan(self: &Arc<Self>, mut request: ScanRequest) -> Result<Vec<ScanRecord>> {
         let _guard = self.writer_lock()?;
+        // A scan another process abandoned must not stay readable as a running generation.
+        self.store.recover_scans()?;
         if request.roots.is_empty() {
             request.roots = self.config.scan_roots.clone();
         }
@@ -234,18 +290,30 @@ impl Engine {
             scan_id: record.id.clone(),
             root: record.root.clone(),
         });
+        let bulk = Bulk(&self.store);
+        self.store.set_bulk(true)?;
         let (tx, rx) = mpsc::sync_channel(self.config.scan_queue_capacity);
         let req = request.clone();
         let ctl = control.clone();
+        let threads = self.config.scan_threads;
         let worker = std::thread::spawn(move || {
-            scanner::scan(&root, &req, &ctl, |msg| tx.send(msg).is_ok())
+            scanner::scan_with_threads(&root, &req, &ctl, threads, |msg| tx.send(msg).is_ok())
         });
         let mut batch = Vec::with_capacity(self.config.batch_size);
         let mut indexed_bytes = 0u64;
         let mut persistence_error = None;
-        for message in rx {
-            let result: Result<()> = match message {
-                ScanMessage::Entry(entry) => {
+        let mut last_flush = Instant::now();
+        let mut last_path_event = Instant::now() - PATH_EVENT_INTERVAL;
+        let streaming = Instant::now();
+        loop {
+            let message = match rx.recv_timeout(FLUSH_INTERVAL) {
+                Ok(message) => Some(message),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let mut result: Result<()> = Ok(());
+            match message {
+                Some(ScanMessage::Entry(entry)) => {
                     record.entries += 1;
                     if entry.depth == 0 {
                         record.logical_bytes = entry.logical_bytes;
@@ -254,38 +322,30 @@ impl Engine {
                     if entry.kind == EntryKind::File {
                         indexed_bytes = indexed_bytes.saturating_add(entry.logical_bytes);
                     }
-                    if self.events.receiver_count() > 0 {
-                        self.emit(OperationEvent::PathIndexed {
-                            scan_id: record.id.clone(),
-                            path: entry.path.clone(),
-                        });
-                    }
                     if entry.kind == EntryKind::Directory && entry.depth <= 1 {
                         self.emit(OperationEvent::DirectoryCompleted {
                             scan_id: record.id.clone(),
                             path: entry.path.clone(),
                             bytes: entry.logical_bytes,
                         });
+                    } else if last_path_event.elapsed() >= PATH_EVENT_INTERVAL
+                        && self.events.receiver_count() > 0
+                    {
+                        last_path_event = Instant::now();
+                        self.emit(OperationEvent::PathIndexed {
+                            scan_id: record.id.clone(),
+                            path: entry.path.clone(),
+                        });
                     }
                     batch.push(*entry);
-                    if batch.len() >= self.config.batch_size {
-                        let r = self.store.insert_batch(&record.id, &batch);
-                        batch.clear();
-                        self.emit(OperationEvent::ScanProgress {
-                            scan_id: record.id.clone(),
-                            entries: record.entries,
-                            bytes: indexed_bytes,
-                        });
-                        r
-                    } else {
-                        Ok(())
-                    }
                 }
-                ScanMessage::Warning {
+                // Running totals of open directories; replaced by their complete rows later.
+                Some(ScanMessage::Provisional(entry)) => batch.push(*entry),
+                Some(ScanMessage::Warning {
                     path,
                     code,
                     message,
-                } => {
+                }) => {
                     record.warnings += 1;
                     self.emit(OperationEvent::ScanWarning {
                         scan_id: record.id.clone(),
@@ -293,19 +353,32 @@ impl Engine {
                         code: code.clone(),
                         message: message.clone(),
                     });
-                    self.store.warning(&record.id, &path, &code, &message)
+                    result = self.store.warning(&record.id, &path, &code, &message);
                 }
-                ScanMessage::Excluded => {
-                    record.excluded += 1;
-                    Ok(())
-                }
-            };
+                Some(ScanMessage::Excluded(count)) => record.excluded += count,
+                None => {}
+            }
+            if result.is_ok()
+                && !batch.is_empty()
+                && (batch.len() >= self.config.batch_size || last_flush.elapsed() >= FLUSH_INTERVAL)
+            {
+                result = self.store.insert_batch(&record.id, &batch);
+                batch.clear();
+                last_flush = Instant::now();
+                self.emit(OperationEvent::ScanProgress {
+                    scan_id: record.id.clone(),
+                    entries: record.entries,
+                    bytes: indexed_bytes,
+                });
+            }
             if let Err(error) = result {
                 persistence_error = Some(error);
                 control.cancel();
                 break;
             }
         }
+        // Closing the receiver frees a scanner blocked on a full queue, so the join cannot hang.
+        drop(rx);
         let traversal = worker
             .join()
             .unwrap_or_else(|_| Err(Error::new("internal_error", "Scanner worker panicked")));
@@ -315,6 +388,7 @@ impl Engine {
             persistence_error = Some(e);
         }
         let failure = persistence_error.or_else(|| traversal.err());
+        let streamed_ms = streaming.elapsed().as_millis();
         record.completed_at = Some(now());
         record.status = match &failure {
             Some(e) if e.code == "scan_cancelled" => "cancelled",
@@ -329,15 +403,27 @@ impl Engine {
             "unknown"
         }
         .into();
+        let publishing = Instant::now();
         self.store
             .finish_scan(&record, self.config.history_retention_days)?;
+        let published_ms = publishing.elapsed().as_millis();
         self.controls
             .lock()
             .map_err(|_| Error::new("internal_error", "Control lock poisoned"))?
             .remove(&record.id);
+        // Announce before the checkpoint that follows bulk mode; pages can refresh at once.
         self.emit(OperationEvent::ScanCompleted {
             scan: record.clone(),
         });
+        drop(bulk);
+        tracing::info!(
+            scan = %record.id,
+            entries = record.entries,
+            streamed_ms,
+            published_ms,
+            checkpoint_ms = publishing.elapsed().as_millis() - published_ms,
+            "scan phases"
+        );
         if let Some(e) = failure {
             return Err(e);
         }
@@ -421,14 +507,27 @@ impl Engine {
         stratum_platform::system::snapshot()
     }
     pub fn explain_storage(&self) -> Result<StorageExplanation> {
-        Ok(StorageExplanation {
-            resources:stratum_platform::system::summary(),
-            scans:self.scans()?,categories:self.categories()?,
-            largest_directories:self.files(&FileQuery {kind:Some("directory".into()),limit:20,..Default::default()})?.items,
-            insights:self.insights()?,history:self.history(None,now()-7*86400)?,
-            interpretation:"Sizes describe indexed paths; hard links and APFS clones can share physical blocks. Missing permissions, exclusions and unscanned roots reduce coverage. History compares observed scans, not continuous change attribution.".into(),
-            coverage:self.coverage()?,
-        })
+        let mut explanation = self.cached("explain_storage", || {
+            Ok(StorageExplanation {
+                resources: stratum_platform::system::summary(),
+                scans: self.scans()?,
+                categories: self.categories()?,
+                largest_directories: self
+                    .files(&FileQuery {
+                        kind: Some("directory".into()),
+                        limit: 20,
+                        ..Default::default()
+                    })?
+                    .items,
+                insights: self.insights()?,
+                history: self.history(None, now() - 7 * 86400)?,
+                interpretation: "Sizes describe indexed paths; hard links and APFS clones can share physical blocks. Missing permissions, exclusions and unscanned roots reduce coverage. History compares observed scans, not continuous change attribution.".into(),
+                coverage: self.coverage()?,
+            })
+        })?;
+        // Capacity and load are live observations, never served from the cache.
+        explanation.resources = stratum_platform::system::summary();
+        Ok(explanation)
     }
 }
 

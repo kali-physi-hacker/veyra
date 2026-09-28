@@ -145,3 +145,90 @@ fn non_utf8_names_are_reported_not_lossily_indexed() {
     .unwrap();
     assert!(found);
 }
+#[test]
+fn directories_follow_their_descendants_and_totals_add_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let mut expected = 0u64;
+    for a in 0..6 {
+        for b in 0..4 {
+            let dir = root.join(format!("a{a}/b{b}/c"));
+            fs::create_dir_all(&dir).unwrap();
+            for f in 0..3 {
+                let size = (a * 100 + b * 10 + f + 1) as u64;
+                fs::write(dir.join(format!("f{f}")), vec![0u8; size as usize]).unwrap();
+                expected += size;
+            }
+        }
+    }
+    fs::write(root.join(".hidden"), "x").unwrap();
+    let mut seen: Vec<String> = vec![];
+    let (mut provisional, mut excluded) = (0u64, 0u64);
+    stratum_platform::scanner::scan_with_threads(
+        &root,
+        &ScanRequest {
+            include_hidden: false,
+            ..Default::default()
+        },
+        &ScanControl::default(),
+        4,
+        |m| {
+            match m {
+                ScanMessage::Entry(e) => {
+                    if e.kind == EntryKind::Directory {
+                        let prefix = format!("{}/", e.path);
+                        let descendants = seen.iter().filter(|p| p.starts_with(&prefix)).count();
+                        assert!(
+                            descendants > 0 || e.logical_bytes == 0,
+                            "{} arrived before its children",
+                            e.path
+                        );
+                        if e.depth == 0 {
+                            assert_eq!(e.logical_bytes, expected);
+                        }
+                    }
+                    seen.push(e.path);
+                }
+                ScanMessage::Provisional(e) => {
+                    assert_eq!(e.kind, EntryKind::Directory);
+                    provisional += 1;
+                }
+                ScanMessage::Excluded(n) => excluded += n,
+                ScanMessage::Warning { .. } => panic!("unexpected warning"),
+            }
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(seen.last().unwrap(), root.to_str().unwrap());
+    assert_eq!(seen.len(), 1 + 6 + 24 + 24 + 72);
+    assert_eq!(excluded, 1);
+    let _ = provisional;
+}
+#[test]
+fn deep_nesting_is_reported_and_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut deep = fs::canonicalize(temp.path()).unwrap();
+    for _ in 0..260 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let mut depth_warnings = 0;
+    let mut deepest = 0;
+    scan(
+        temp.path(),
+        &ScanRequest::default(),
+        &ScanControl::default(),
+        |m| {
+            match m {
+                ScanMessage::Warning { code, .. } if code == "depth_limit" => depth_warnings += 1,
+                ScanMessage::Entry(e) => deepest = deepest.max(e.depth),
+                _ => {}
+            }
+            true
+        },
+    )
+    .unwrap();
+    assert_eq!(depth_warnings, 1);
+    assert!(deepest < 256);
+}

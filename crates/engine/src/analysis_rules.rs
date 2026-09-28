@@ -13,28 +13,27 @@ impl AnalysisRule for DeveloperRule {
         }
     }
     fn analyze(&self, ctx: &AnalysisContext<'_>) -> Result<Vec<Insight>> {
-        let mut candidates = Vec::new();
-        for name in [
-            "target",
-            "node_modules",
-            "DerivedData",
-            ".npm",
-            ".gradle",
-            ".m2",
-            ".venv",
-            ".git",
-        ] {
-            candidates.extend(
-                ctx.engine
-                    .files(&FileQuery {
-                        kind: Some("directory".into()),
-                        name: Some(name.into()),
-                        limit: 100,
-                        ..Default::default()
-                    })?
-                    .items,
-            );
-        }
+        let mut candidates = ctx
+            .engine
+            .files(&FileQuery {
+                kind: Some("directory".into()),
+                names: [
+                    "target",
+                    "node_modules",
+                    "DerivedData",
+                    ".npm",
+                    ".gradle",
+                    ".m2",
+                    ".venv",
+                    ".git",
+                ]
+                .iter()
+                .map(|n| n.to_string())
+                .collect(),
+                limit: 800,
+                ..Default::default()
+            })?
+            .items;
         candidates.sort_by(|a, b| a.path.cmp(&b.path));
         let mut accepted: Vec<String> = Vec::new();
         let mut out = Vec::new();

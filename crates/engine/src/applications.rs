@@ -3,6 +3,9 @@ use std::path::Path;
 use stratum_domain::*;
 impl Engine {
     pub fn applications(&self) -> Result<Vec<Application>> {
+        self.cached("applications", || self.discover_applications())
+    }
+    fn discover_applications(&self) -> Result<Vec<Application>> {
         let bundles = self.files(&FileQuery {
             kind: Some("directory".into()),
             name: Some("*.app".into()),
