@@ -265,6 +265,7 @@ pub enum Payload {
     DuplicatePage(domain::Page<DuplicateGroup>),
     System(Box<SystemSnapshot>),
     Candidates(domain::Page<CleanupCandidate>, Vec<CleanupOperation>),
+    Locations(Vec<CleanupLocation>, Vec<CleanupOperation>),
     Plan(Box<CleanupPlan>),
     Operation(Box<CleanupOperation>),
     Audit(Vec<AuditRecord>),
@@ -335,6 +336,9 @@ pub struct App {
     pub candidates: Vec<CleanupCandidate>,
     pub cleanup_rows: Vec<CleanupRow>,
     pub cleanup_nav: Nav,
+    /// Folders the cleanup rules recognise, listed before one is opened.
+    pub locations: Vec<CleanupLocation>,
+    pub locations_nav: Nav,
     pub cleanup_offset: u64,
     pub cleanup_has_more: bool,
     pub cleanup_scope: Option<String>,
@@ -414,6 +418,8 @@ impl App {
             candidates: Vec::new(),
             cleanup_rows: Vec::new(),
             cleanup_nav: Nav::default(),
+            locations: Vec::new(),
+            locations_nav: Nav::default(),
             cleanup_offset: 0,
             cleanup_has_more: false,
             cleanup_scope: None,
@@ -435,6 +441,10 @@ impl App {
     }
     pub fn loading(&self) -> bool {
         self.queries.loading()
+    }
+    /// No answer has arrived for the open view yet: show a placeholder, not an empty state.
+    pub fn waiting(&self) -> bool {
+        self.queries.waiting()
     }
     /// Whether the interface needs periodic redraws for motion.
     pub fn animating(&self) -> bool {
@@ -496,7 +506,7 @@ impl App {
                 .is_none_or(|t| t.elapsed() >= SAMPLE_INTERVAL)
         {
             self.last_sample = Some(Instant::now());
-            self.refresh();
+            self.refresh_live();
         }
     }
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -521,6 +531,12 @@ impl App {
     }
     pub fn refresh(&mut self) {
         self.queries.request();
+        self.launch_query();
+    }
+    /// Newer data for the view already open, as while a scan fills it: the answer on its way is
+    /// still shown, then this refresh runs.
+    fn refresh_live(&mut self) {
+        self.queries.refresh();
         self.launch_query();
     }
     fn launch_query(&mut self) {
@@ -586,6 +602,10 @@ impl App {
                     }
                 }
                 Page::System => Ok(Payload::System(Box::new(engine.system()))),
+                Page::Cleanup if scope.is_none() => Ok(Payload::Locations(
+                    engine.cleanup_locations(None)?,
+                    engine.cleanup_operations()?,
+                )),
                 Page::Cleanup => Ok(Payload::Candidates(
                     engine.cleanup_candidates(&FileQuery {
                         path: scope,
@@ -632,7 +652,7 @@ impl App {
                             .is_none_or(|t| t.elapsed() >= Duration::from_millis(900))
                     {
                         self.scan.last_refresh = Some(Instant::now());
-                        self.refresh();
+                        self.refresh_live();
                     }
                     changed = true;
                 }
@@ -666,8 +686,11 @@ impl App {
             changed = true;
             let result = match message {
                 Message::Query(revision, result) => {
-                    if !self.queries.finish(revision) {
-                        self.launch_query();
+                    let current = self.queries.finish(revision);
+                    // Start whatever was asked for meanwhile, then show this answer if it still
+                    // describes the open view.
+                    self.launch_query();
+                    if !current {
                         continue;
                     }
                     result
@@ -764,6 +787,15 @@ impl App {
             Payload::Candidates(page, operations) => {
                 self.candidates = page.items;
                 self.cleanup_has_more = page.has_more;
+                self.operations = operations;
+                self.operations_nav.ensure(self.operations.len());
+                self.rebuild_cleanup_rows();
+            }
+            Payload::Locations(locations, operations) => {
+                self.locations = locations;
+                self.locations_nav.ensure(self.locations.len());
+                self.candidates.clear();
+                self.cleanup_has_more = false;
                 self.operations = operations;
                 self.operations_nav.ensure(self.operations.len());
                 self.rebuild_cleanup_rows();
@@ -1044,11 +1076,17 @@ impl App {
             }
             Page::System => vec![("o", "sort"), ("↑↓", "processes")],
             Page::Cleanup => match self.cleanup_phase() {
+                CleanupPhase::Select if self.cleanup_scope.is_none() => vec![
+                    ("↑↓", "move"),
+                    ("⏎", "open folder"),
+                    ("p", "plan"),
+                    ("o", "operations"),
+                ],
                 CleanupPhase::Select => vec![
                     ("x", "toggle"),
                     ("a", "all on page"),
                     ("p", "plan"),
-                    ("o", "operations"),
+                    ("0", "all folders"),
                     ("] [", "page"),
                 ],
                 CleanupPhase::Review => vec![],
@@ -1452,6 +1490,10 @@ impl App {
             }
             return;
         }
+        if self.cleanup_scope.is_none() {
+            self.folder_key(key, page_len);
+            return;
+        }
         let len = self.cleanup_rows.len();
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
@@ -1534,7 +1576,7 @@ impl App {
                 self.operations_nav.ensure(self.operations.len());
                 self.overlay = Overlay::Operations;
             }
-            KeyCode::Char('0') if self.cleanup_scope.is_some() => {
+            KeyCode::Char('0') | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') if self.cleanup_scope.is_some() => {
                 self.cleanup_scope = None;
                 self.cleanup_offset = 0;
                 self.refresh();
@@ -1725,6 +1767,46 @@ impl App {
         };
         self.page = Page::Storage;
         self.browse(target);
+    }
+    /// Keys on the Cleanup page before a folder is opened: move through the folders, open one,
+    /// or plan the files already chosen.
+    fn folder_key(&mut self, key: KeyEvent, page_len: usize) {
+        let len = self.locations.len();
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => self.locations_nav.step(len, 1),
+            KeyCode::Up | KeyCode::Char('k') => self.locations_nav.step(len, -1),
+            KeyCode::PageDown => self.locations_nav.step(len, page_len as i64),
+            KeyCode::PageUp => self.locations_nav.step(len, -(page_len as i64)),
+            KeyCode::Char('g') | KeyCode::Home => self.locations_nav.first(len),
+            KeyCode::Char('G') | KeyCode::End => self.locations_nav.last(len),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                if let Some(path) = self.locations_nav.index(len).and_then(|i| self.locations.get(i)).map(|l| l.path.clone()) {
+                    // The selection carries across folders, so one plan can cover several.
+                    self.cleanup_scope = Some(path);
+                    self.cleanup_offset = 0;
+                    self.cleanup_nav.reset();
+                    self.refresh();
+                }
+            }
+            KeyCode::Char('n') => self.selected.clear(),
+            KeyCode::Char('p') => {
+                if self.selected.is_empty() {
+                    self.toast("Open a folder and select exact files first", ToastKind::Warning);
+                } else {
+                    let paths = self.selected.keys().cloned().collect();
+                    self.task(move |engine| {
+                        Ok(Payload::Plan(Box::new(
+                            engine.create_cleanup_plan(PlanRequest { paths })?,
+                        )))
+                    });
+                }
+            }
+            KeyCode::Char('o') => {
+                self.operations_nav.ensure(self.operations.len());
+                self.overlay = Overlay::Operations;
+            }
+            _ => {}
+        }
     }
     fn review_candidates(&mut self, scope: Option<String>) {
         self.cleanup_scope = scope;

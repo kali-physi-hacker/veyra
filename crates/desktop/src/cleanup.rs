@@ -107,98 +107,102 @@ impl App {
             p.amber,
             false,
         );
-        if let Some(scope) = self.cleanup_scope.clone() {
-            ui.horizontal(|ui| {
-                kit::badge_icon(
-                    ui,
-                    Some(icons::FUNNEL),
-                    &format!("Scope · {}", short_path(&scope)),
-                    p.accent,
-                );
-                if Button::ghost("All indexed locations")
-                    .small()
-                    .show(ui)
-                    .clicked()
-                {
-                    self.cleanup_scope = None;
-                    self.offset = 0;
-                    self.refresh();
-                }
-            });
-        }
-        kit::caption(
-            ui,
-            "Nothing is preselected. Candidate rules recognise individual Cargo artifacts and downloaded package-cache files; they do not prove expendability.",
-        );
-        if self.candidates.is_empty() {
-            if self.queries.loading() {
-                kit::skeleton(ui, 6);
-            } else {
-                kit::empty_state(
-                    ui,
-                    icons::BROOM,
-                    if self.has_more {
-                        "No candidates on this index page"
-                    } else {
-                        "No supported candidates on this page"
-                    },
-                    if self.has_more {
-                        "Use Next to continue through the index. Only known candidate rules are included."
-                    } else {
-                        "A large file is not automatically a cleanup candidate. Try reviewing a development folder from Insights."
-                    },
-                );
-            }
-        }
-        let mut groups = BTreeMap::<String, Vec<CleanupCandidate>>::new();
-        for candidate in &self.candidates {
-            groups
-                .entry(candidate.category.clone())
-                .or_default()
-                .push(candidate.clone());
-        }
-        for (category, items) in groups {
-            let (icon, color) = kit::category_style(&p, &category);
-            Card::new().padding(14.0).show(ui, |ui| {
+        if self.cleanup_scope.is_none() {
+            self.cleanup_folders(ui);
+        } else {
+            if let Some(scope) = self.cleanup_scope.clone() {
                 ui.horizontal(|ui| {
-                    kit::icon_tile(ui, icon, color, 36.0);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        kit::badge_icon(
-                            ui,
-                            Some(icons::ARROW_COUNTER_CLOCKWISE),
-                            "Undo supported",
-                            p.teal,
-                        );
-                        kit::badge_icon(ui, Some(icons::WARNING), "Moderate risk", p.amber);
-                        kit::badge(ui, &format!("{} files on this page", items.len()), p.text_3);
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                kit::label(ui, humanize(&category), 15.0, Weight::SemiBold, p.text);
-                                if let Some(first) = items.first() {
-                                    kit::label(ui, &first.reason, 12.5, Weight::Regular, p.text_2);
-                                }
+                    kit::badge_icon(
+                        ui,
+                        Some(icons::FUNNEL),
+                        &format!("Scope · {}", short_path(&scope)),
+                        p.accent,
+                    );
+                    if Button::ghost("All cleanup folders")
+                        .small()
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.cleanup_scope = None;
+                        self.offset = 0;
+                        self.refresh();
+                    }
+                });
+            }
+            kit::caption(
+                ui,
+                "Nothing is preselected. Candidate rules recognise individual Cargo artifacts and downloaded package-cache files; they do not prove expendability.",
+            );
+            if self.candidates.is_empty() {
+                if self.queries.waiting() {
+                    kit::skeleton(ui, 6);
+                } else {
+                    kit::empty_state(
+                        ui,
+                        icons::BROOM,
+                        if self.has_more {
+                            "No candidates on this index page"
+                        } else {
+                            "No supported candidates on this page"
+                        },
+                        if self.has_more {
+                            "Use Next to continue through the index. Only known candidate rules are included."
+                        } else {
+                            "A large file is not automatically a cleanup candidate. Try reviewing a development folder from Insights."
+                        },
+                    );
+                }
+            }
+            let mut groups = BTreeMap::<String, Vec<CleanupCandidate>>::new();
+            for candidate in &self.candidates {
+                groups
+                    .entry(candidate.category.clone())
+                    .or_default()
+                    .push(candidate.clone());
+            }
+            for (category, items) in groups {
+                let (icon, color) = kit::category_style(&p, &category);
+                Card::new().padding(14.0).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        kit::icon_tile(ui, icon, color, 36.0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            kit::badge_icon(
+                                ui,
+                                Some(icons::ARROW_COUNTER_CLOCKWISE),
+                                "Undo supported",
+                                p.teal,
+                            );
+                            kit::badge_icon(ui, Some(icons::WARNING), "Moderate risk", p.amber);
+                            kit::badge(ui, &format!("{} files on this page", items.len()), p.text_3);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    kit::label(ui, humanize(&category), 15.0, Weight::SemiBold, p.text);
+                                    if let Some(first) = items.first() {
+                                        kit::label(ui, &first.reason, 12.5, Weight::Regular, p.text_2);
+                                    }
+                                });
                             });
                         });
                     });
-                });
-                ui.add_space(6.0);
-                kit::divider(ui);
-                ui.add_space(2.0);
-                for candidate in &items {
-                    let mut checked = self.selected.contains_key(&candidate.path);
-                    let response = candidate_row(ui, candidate, &mut checked, !self.busy);
-                    if response.changed() {
-                        if checked {
-                            self.selected.insert(candidate.path.clone(), candidate.size);
-                        } else {
-                            self.selected.remove(&candidate.path);
+                    ui.add_space(6.0);
+                    kit::divider(ui);
+                    ui.add_space(2.0);
+                    for candidate in &items {
+                        let mut checked = self.selected.contains_key(&candidate.path);
+                        let response = candidate_row(ui, candidate, &mut checked, !self.busy);
+                        if response.changed() {
+                            if checked {
+                                self.selected.insert(candidate.path.clone(), candidate.size);
+                            } else {
+                                self.selected.remove(&candidate.path);
+                            }
                         }
                     }
-                }
-            });
+                });
+            }
+            self.pager(ui);
         }
-        self.pager(ui);
         ui.add_space(8.0);
         kit::disclosure(
             ui,
@@ -255,6 +259,69 @@ impl App {
                 }
             },
         );
+    }
+    /// Before any folder is opened: every folder the cleanup rules recognise, largest first,
+    /// straight from the index, so the scan from Overview is all this page needs.
+    fn cleanup_folders(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
+        kit::caption(
+            ui,
+            "Folders the cleanup rules recognise in the index, largest first: Cargo build output beside a Cargo.toml, npm's package cache and Cargo's registry cache. Open one to choose files from it; nothing is preselected.",
+        );
+        if self.locations.is_empty() {
+            if self.queries.waiting() {
+                kit::skeleton(ui, 4);
+            } else {
+                kit::empty_state(
+                    ui,
+                    icons::BROOM,
+                    "No recognised cleanup folders in the index",
+                    "Scan a location that holds Rust projects or package caches. Large files on their own are not cleanup candidates.",
+                );
+            }
+            return;
+        }
+        let total: u64 = self.locations.iter().map(|l| l.logical_bytes).sum();
+        let largest = self.locations.first().map_or(1, |l| l.logical_bytes.max(1));
+        let mut open = None;
+        Card::new().padding(14.0).show(ui, |ui| {
+            kit::label(
+                ui,
+                format!("{} folders · {}", self.locations.len(), bytes(total)),
+                15.0,
+                Weight::SemiBold,
+                p.text,
+            );
+            kit::caption(ui, "Sizes are the index's totals for each folder; quarantine moves the files you choose, up to a thousand per plan.");
+            ui.add_space(6.0);
+            kit::divider(ui);
+            for location in &self.locations {
+                let (icon, color) = kit::category_style(&p, &location.category);
+                let response = Row::new(short_path(&location.path))
+                    .plain_icon(icon, color)
+                    .subtitle(location_kind(&location.category, &location.path))
+                    .trailing(bytes(location.logical_bytes), p.text)
+                    .height(50.0)
+                    .chevron()
+                    .show(ui);
+                kit::progress(
+                    ui,
+                    ui.available_width(),
+                    3.0,
+                    location.logical_bytes as f32 / largest as f32,
+                    color,
+                );
+                ui.add_space(4.0);
+                if response.clicked() {
+                    open = Some(location.path.clone());
+                }
+            }
+        });
+        if let Some(path) = open {
+            self.cleanup_scope = Some(path);
+            self.offset = 0;
+            self.refresh();
+        }
     }
     fn plan_view(&mut self, ui: &mut egui::Ui, plan: &CleanupPlan) {
         let p = self.palette;
@@ -531,4 +598,13 @@ fn candidate_row(
         response.mark_changed();
     }
     response
+}
+
+/// What a recognised folder is and what happens after it is emptied.
+fn location_kind(category: &str, path: &str) -> &'static str {
+    match category {
+        "developer_build_artifact" => "Cargo build output · rebuilt by the next build",
+        _ if path.ends_with("/_cacache") => "npm package cache · refilled by the next install",
+        _ => "Cargo registry cache · refilled by the next build",
+    }
 }

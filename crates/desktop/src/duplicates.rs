@@ -151,7 +151,7 @@ impl App {
                     false,
                 );
             }
-        } else if self.queries.loading() {
+        } else if self.queries.waiting() {
             kit::skeleton(ui, 6);
         } else {
             kit::empty_state(

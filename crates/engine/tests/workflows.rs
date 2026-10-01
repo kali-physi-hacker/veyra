@@ -803,3 +803,43 @@ fn scans_stream_progress_and_directory_totals_match_their_files() {
     assert_eq!(project.logical_bytes, files);
     assert_eq!(records[0].entries, 6);
 }
+
+#[test]
+fn cleanup_locations_cover_the_whole_index_not_one_page_of_large_files() {
+    let f = Fixture::new();
+    // A large file elsewhere fills the largest-files page; it must not hide the candidates.
+    fs::write(f.root.join("movie.mov"), vec![0u8; 256 * 1024]).unwrap();
+    // A folder called target without a Cargo.toml beside it is not Cargo build output.
+    fs::create_dir_all(f.root.join("maven/target")).unwrap();
+    fs::write(f.root.join("maven/target/app.jar"), "jar").unwrap();
+    // The npm content cache and Cargo's registry cache.
+    fs::create_dir_all(f.root.join("home/.npm/_cacache/content-v2")).unwrap();
+    fs::write(f.root.join("home/.npm/_cacache/content-v2/blob"), "npm blob").unwrap();
+    fs::create_dir_all(f.root.join("home/.cargo/registry/cache/index.crates.io")).unwrap();
+    fs::write(f.root.join("home/.cargo/registry/cache/index.crates.io/serde.crate"), "crate").unwrap();
+    // A target nested inside another target is counted in the outer one.
+    fs::create_dir_all(f.root.join("project/target/debug/build/x/target")).unwrap();
+    fs::write(f.root.join("project/target/debug/build/x/Cargo.toml"), "[package]\nname='x'\n").unwrap();
+    fs::write(f.root.join("project/target/debug/build/x/target/out"), "nested").unwrap();
+    f.scan();
+
+    let root = f.root.to_string_lossy().to_string();
+    let found = f.engine.cleanup_locations(None).unwrap();
+    let mut paths: Vec<String> = found.iter().map(|l| l.path.trim_start_matches(&root).to_string()).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["/home/.cargo/registry/cache", "/home/.npm/_cacache", "/project/target"], "{found:?}");
+    let cargo = found.iter().find(|l| l.path.ends_with("/project/target")).unwrap();
+    assert_eq!(cargo.category, "developer_build_artifact");
+    assert!(cargo.logical_bytes > 0, "a folder carries its indexed total");
+    assert!(found.windows(2).all(|w| w[0].logical_bytes >= w[1].logical_bytes), "largest first");
+
+    // A scope keeps only the folders inside it, and the folder's files are candidates.
+    let project = f.root.join("project").to_string_lossy().to_string();
+    let scoped = f.engine.cleanup_locations(Some(&project)).unwrap();
+    assert_eq!(scoped.len(), 1, "{scoped:?}");
+    let files = f
+        .engine
+        .cleanup_candidates(&FileQuery { path: Some(scoped[0].path.clone()), limit: 100, ..Default::default() })
+        .unwrap();
+    assert!(files.items.iter().any(|c| c.path == f.artifact()), "{:?}", files.items);
+}

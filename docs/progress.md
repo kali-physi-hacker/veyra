@@ -175,3 +175,20 @@ The Home scan of 27 September left a 13.1 GB `index.sqlite3-wal` beside a 5.4 GB
 - Publication is one transaction, so the WAL briefly reaches about the size of the generation it publishes: roughly 6 GB for a 5.5-million-entry home folder. A disk with less free space than that fails the publication, which rolls back and leaves the previous generation in place.
 - A truncation waits for readers; a page holding a long read can defer it to the next batch or the next open.
 
+## Cleanup from the whole index — 2026-10-01
+
+### Found
+
+The Cleanup page in both interfaces asked the index for its hundred largest files and ran the candidate rule over those alone. Cargo build output and package caches are rarely among a home folder's largest files, so the first page of the Home index held no candidate and the rest of 5.5 million entries was reachable only through Next. While a scan ran, the page refreshed every 900 ms and the desktop and terminal discarded any answer that arrived after a newer request, so a query slower than 900 ms never showed and the page stayed on its loading placeholder.
+
+### Implemented
+
+- `Engine::cleanup_locations` and `stratum cleanup locations`: every recognised folder, largest first, from the directory-name index and the folders' indexed totals, with a manifest check per Cargo `target` and nested folders folded into their parent. Unscoped calls are cached against the index version.
+- Desktop and terminal Cleanup open on that list; a folder opens its candidate files by size; the selection carries across folders into one plan, still at most a thousand regular files with their identity and content checks.
+- `LatestRequest` separates navigation from same-view refreshes in both interfaces, starts queued queries as soon as an answer arrives, and reports `waiting` until a view's first answer, which placeholders now use.
+- Tests: the engine finds all three kinds of folder past a larger ordinary file and leaves out a Maven `target` and a nested one; the desktop opens on the folder and a click lists its artifact; the terminal walks folder, files, plan, quarantine and restore; both request trackers keep an answer across refreshes and drop it across navigation.
+
+### Measurements
+
+The Home index (5,515,645 entries): `stratum cleanup locations` lists 11 folders holding 12.31 GB (11.72 GB in one project's `target`) in 0.74 s including process start; the first page of candidates in that folder takes 0.05 s. The old first page, the hundred largest files, held no candidates.
+

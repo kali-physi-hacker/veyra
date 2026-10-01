@@ -177,7 +177,7 @@ impl App {
         }
         ui.add_space(2.0);
         if self.files.is_empty() {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 6);
             } else {
                 kit::empty_state(
@@ -297,7 +297,7 @@ impl App {
         }
         self.navigation(ui);
         let Some(breakdown) = self.breakdown.clone() else {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 6);
             }
             return;

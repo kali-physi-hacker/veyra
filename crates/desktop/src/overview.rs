@@ -6,7 +6,7 @@ impl App {
     pub(super) fn overview(&mut self, ui: &mut egui::Ui) {
         let p = self.palette;
         let Some(value) = &self.overview else {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 8);
             } else {
                 kit::empty_state(

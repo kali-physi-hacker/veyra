@@ -4,7 +4,7 @@ impl App {
     pub(super) fn insights(&mut self, ui: &mut egui::Ui) {
         let p = self.palette;
         if self.insights.is_empty() {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 6);
             } else {
                 kit::empty_state(

@@ -42,7 +42,8 @@ stratum system --json
 stratum process top --limit 20 --json
 stratum explain-storage --json
 
-stratum cleanup candidates --limit 100 --json
+stratum cleanup locations --json
+stratum cleanup candidates --path "$HOME/Projects/app/target" --limit 100 --json
 stratum cleanup plan --path /absolute/project/target/debug/example --json
 stratum cleanup show PLAN_ID --json
 stratum cleanup execute PLAN_ID --approve 'QUARANTINE PLAN_ID' --json

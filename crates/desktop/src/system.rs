@@ -14,7 +14,7 @@ impl App {
         let p = self.palette;
         let t = self.reveal;
         let Some(snapshot) = self.system.clone() else {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 8);
             } else {
                 kit::empty_state(

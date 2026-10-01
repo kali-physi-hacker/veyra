@@ -354,6 +354,17 @@ pub struct CleanupCandidate {
     pub reversible: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CleanupLocation {
+    /// The folder: a Cargo target directory, npm's content cache or Cargo's registry cache.
+    pub path: String,
+    pub category: String,
+    pub reason: String,
+    /// The folder's totals as the index holds them.
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+    pub modified_at: Option<i64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlanItem {
     pub path: String,
     pub bytes: u64,

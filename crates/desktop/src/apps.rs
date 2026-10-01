@@ -6,7 +6,7 @@ impl App {
     pub(super) fn apps(&mut self, ui: &mut egui::Ui) {
         let p = self.palette;
         if self.apps.is_empty() {
-            if self.queries.loading() {
+            if self.queries.waiting() {
                 kit::skeleton(ui, 6);
             } else {
                 kit::empty_state(

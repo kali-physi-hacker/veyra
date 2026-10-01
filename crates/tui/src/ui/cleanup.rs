@@ -64,7 +64,116 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         CleanupPhase::Outcome => render_outcome(frame, app, body),
     }
 }
+/// Before a folder is opened: every folder the cleanup rules recognise, largest first, straight
+/// from the index.
+fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme;
+    let [bar, list_area, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let selected_bytes: u64 = app.selected.values().sum();
+    let total: u64 = app.locations.iter().map(|l| l.logical_bytes).sum();
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled(format!("{} folders", app.locations.len()), theme.strong()),
+            Span::styled(format!(" · {} in the index", widgets::bytes(total)), theme.muted()),
+            Span::styled(
+                format!("   {} selected", app.selected.len()),
+                if app.selected.is_empty() {
+                    theme.faint()
+                } else {
+                    theme.bold(theme.teal)
+                },
+            ),
+            Span::styled(format!(" · {}", widgets::bytes(selected_bytes)), theme.faint()),
+        ]),
+        bar,
+    );
+    if app.locations.is_empty() {
+        if !app.waiting() {
+            empty_state(
+                frame,
+                &theme,
+                list_area,
+                "No recognised cleanup folders in the index",
+                "Candidate rules recognise Cargo build output beside a Cargo.toml, npm's package cache and Cargo's registry cache. Scan a location that holds them; a large file on its own is not a candidate.",
+            );
+        }
+    } else {
+        let block = card_accent(&theme, "Cleanup folders · largest first", theme.amber);
+        let width = block.inner(list_area).width.saturating_sub(2) as usize;
+        let largest = app.locations.first().map_or(1, |l| l.logical_bytes.max(1));
+        let cells = 10;
+        let kind_width = 21;
+        let path_width = width.saturating_sub(kind_width + cells + 14);
+        let items: Vec<ListItem> = app
+            .locations
+            .iter()
+            .map(|location| {
+                let color = if location.category == "developer_build_artifact" {
+                    theme.accent
+                } else {
+                    theme.teal
+                };
+                let mut spans = vec![
+                    Span::styled(widgets::fit(folder_kind(location), kind_width), theme.color(color)),
+                    Span::raw(" "),
+                    Span::styled(
+                        widgets::fit(
+                            &widgets::truncate_middle(&widgets::short_path(&location.path), path_width),
+                            path_width,
+                        ),
+                        theme.text(),
+                    ),
+                    Span::styled(widgets::pad_left(&widgets::bytes(location.logical_bytes), 11), theme.strong()),
+                    Span::raw(" "),
+                ];
+                spans.extend(widgets::bar(&theme, location.logical_bytes as f64 / largest as f64, cells, color));
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let mut state = app.locations_nav.list_state();
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_style(theme.selected())
+                .highlight_symbol("▌ ")
+                .block(block),
+            list_area,
+            &mut state,
+        );
+        app.locations_nav.offset = state.offset();
+    }
+    let reason = app
+        .locations_nav
+        .index(app.locations.len())
+        .and_then(|i| app.locations.get(i))
+        .map(|l| l.reason.clone())
+        .unwrap_or_else(|| "Open a folder to choose exact files; nothing is preselected.".into());
+    frame.render_widget(
+        Line::from(vec![
+            Span::styled("⏎ open  ", theme.muted()),
+            Span::styled(
+                widgets::truncate_end(&reason, footer.width.saturating_sub(10) as usize),
+                theme.faint(),
+            ),
+        ]),
+        footer,
+    );
+}
+fn folder_kind(location: &CleanupLocation) -> &'static str {
+    match location.category.as_str() {
+        "developer_build_artifact" => "Cargo build output",
+        _ if location.path.ends_with("/_cacache") => "npm package cache",
+        _ => "Cargo registry cache",
+    }
+}
 fn render_selection(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.cleanup_scope.is_none() {
+        return render_folders(frame, app, area);
+    }
     let theme = app.theme;
     let [bar, list_area, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -96,24 +205,24 @@ fn render_selection(frame: &mut Frame, app: &mut App, area: Rect) {
             widgets::truncate_middle(&widgets::short_path(scope), 40),
             theme.color(theme.teal),
         ));
-        spans.push(Span::styled("  (0 = all indexed locations)", theme.faint()));
+        spans.push(Span::styled("  (0 = all folders)", theme.faint()));
     }
     frame.render_widget(Line::from(spans), bar);
     if app.candidates.is_empty() {
-        if !app.loading() {
+        if !app.waiting() {
             empty_state(
                 frame,
                 &theme,
                 list_area,
                 if app.cleanup_has_more {
-                    "No candidates on this index page"
+                    "No candidates on this page"
                 } else {
-                    "No supported candidates here"
+                    "No candidate files here"
                 },
                 if app.cleanup_has_more {
-                    "Press ] to continue through the index. Only known candidate rules are included."
+                    "Press ] to continue through this folder."
                 } else {
-                    "A large file is not automatically a cleanup candidate. Candidate rules recognize individual Cargo artifacts and downloaded package-cache files; they do not prove expendability. Try reviewing a development folder from Insights."
+                    "Only Cargo build output and downloaded package caches are candidates; a large file is not one on its own. Press 0 for every recognised folder."
                 },
             );
         }

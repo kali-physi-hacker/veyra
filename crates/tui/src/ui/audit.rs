@@ -14,7 +14,7 @@ use ratatui::{
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme;
     if app.audit.is_empty() {
-        if !app.loading() {
+        if !app.waiting() {
             empty_state(
                 frame,
                 &theme,

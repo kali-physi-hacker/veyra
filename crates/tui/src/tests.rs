@@ -180,7 +180,7 @@ fn every_page_renders_fixture_data_at_wide_and_compact_widths() {
         ),
         (Page::Duplicates, &["Verify before deciding"]),
         (Page::System, &["CPU", "Memory", "Processes"]),
-        (Page::Cleanup, &["Choose files", "Candidates", "artifact-0"]),
+        (Page::Cleanup, &["Choose files", "Cleanup folders", "Cargo build output"]),
         (Page::Audit, &["Timeline", "scan"]),
     ];
     for (page, needles) in expectations {
@@ -271,10 +271,18 @@ fn cleanup_requires_the_exact_phrase_then_quarantines_and_restores() {
     let mut app = App::new(harness.engine.clone(), Theme::truecolor());
     settle(&mut app);
     go(&mut app, Page::Cleanup);
+    // The page opens on the folders the rules recognise, found in the index without paging.
+    assert_eq!(app.locations.len(), 1, "{:?}", app.locations);
+    assert!(app.locations[0].path.ends_with("Projects/atlas/target"), "{:?}", app.locations);
+    assert!(app.candidates.is_empty());
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
     assert!(
         !app.candidates.is_empty(),
-        "fixture must yield Cargo artifact candidates"
+        "the opened folder must list its Cargo artifacts"
     );
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("all folders"), "the way back to every folder must be shown\n{text}");
     assert!(app.selected.is_empty(), "nothing may be preselected");
     press(&mut app, 'x');
     assert_eq!(app.selected.len(), 1);

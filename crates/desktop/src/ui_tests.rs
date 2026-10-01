@@ -300,3 +300,37 @@ fn saved_index_opens_from_the_scan_dialog_without_scanning_again() {
         "the saved index is browsed immediately"
     );
 }
+
+#[test]
+fn cleanup_opens_on_the_recognised_folders_and_a_click_lists_their_files() {
+    let (temp, engine) = fixture_engine();
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+    std::fs::write(root.join("target/debug/artifact"), "rebuild me").unwrap();
+    // A far larger ordinary file, which used to fill the only page the rules looked at.
+    std::fs::write(root.join("video.mov"), vec![0u8; 512 * 1024]).unwrap();
+    engine.scan_location(root.to_str().unwrap()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(&ctx, engine.clone(), Page::Cleanup);
+    settle(&mut app);
+    assert_eq!(app.locations.len(), 1, "{:?}", app.locations);
+    assert!(app.candidates.is_empty(), "nothing is listed or selected before a folder is opened");
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    assert!(text.iter().any(|(t, _)| t.contains("Cargo build output")), "{text:?}");
+    let position = text
+        .iter()
+        .find(|(t, _)| t.ends_with("target"))
+        .expect("the folder row must be visible")
+        .1;
+    click(&mut app, &ctx, position);
+    settle(&mut app);
+    assert!(app.cleanup_scope.as_deref().is_some_and(|s| s.ends_with("project/target")), "{:?}", app.cleanup_scope);
+    assert!(
+        app.candidates.iter().any(|c| c.path.ends_with("target/debug/artifact")),
+        "{:?}",
+        app.candidates
+    );
+    assert!(app.selected.is_empty(), "nothing may be preselected");
+}

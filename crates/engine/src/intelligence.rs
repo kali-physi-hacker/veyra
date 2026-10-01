@@ -21,6 +21,9 @@ pub trait CleanupRule: Send + Sync {
     fn evaluate(&self, entry: &Entry) -> Option<CleanupCandidate>;
 }
 
+const CARGO_TARGET_REASON: &str = "File inside target beside a Cargo.toml manifest. Usually rebuildable, but local edits and active builds remain possible.";
+const PACKAGE_CACHE_REASON: &str = "File inside a recognized downloaded package cache. Restoring dependencies may require network access.";
+
 pub struct RegeneratableRule;
 impl CleanupRule for RegeneratableRule {
     fn id(&self) -> &'static str {
@@ -48,17 +51,9 @@ impl CleanupRule for RegeneratableRule {
                     .is_some_and(|p| p.file_name().is_some_and(|n| n == ".cargo"))
         });
         let (category, reason, confidence) = if cargo_target.is_some() {
-            (
-                "developer_build_artifact",
-                "File inside target beside a Cargo.toml manifest. Usually rebuildable, but local edits and active builds remain possible.",
-                0.95,
-            )
+            ("developer_build_artifact", CARGO_TARGET_REASON, 0.95)
         } else if known_cache || cargo_registry {
-            (
-                "package_cache",
-                "File inside a recognized downloaded package cache. Restoring dependencies may require network access.",
-                0.95,
-            )
+            ("package_cache", PACKAGE_CACHE_REASON, 0.95)
         } else {
             return None;
         };
@@ -96,6 +91,60 @@ impl Engine {
             insights.sort_by_key(|i| std::cmp::Reverse(i.estimated_impact));
             Ok(insights)
         })
+    }
+    /// The folders whose files the cleanup rules recognise, largest first, found in the index
+    /// rather than on one page of large files: Cargo target directories beside a Cargo.toml,
+    /// npm's content cache and Cargo's registry cache. Directories carry their totals in the
+    /// index, so this is one indexed lookup plus a manifest check per target directory.
+    /// `scope` keeps only the folders inside one subtree.
+    pub fn cleanup_locations(&self, scope: Option<&str>) -> Result<Vec<CleanupLocation>> {
+        let find = || -> Result<Vec<CleanupLocation>> {
+            let dirs = self.files(&FileQuery {
+                kind: Some("directory".into()),
+                names: vec!["target".into(), "_cacache".into(), "cache".into()],
+                path: scope.map(str::to_string),
+                limit: 1000,
+                ..Default::default()
+            })?;
+            let mut found: Vec<CleanupLocation> = dirs
+                .items
+                .into_iter()
+                .filter_map(|d| {
+                    let path = Path::new(&d.path);
+                    let parent = path.parent()?;
+                    let (category, reason) = match d.name.as_str() {
+                        "target" if parent.join("Cargo.toml").is_file() => ("developer_build_artifact", CARGO_TARGET_REASON),
+                        "_cacache" if parent.file_name().is_some_and(|n| n == ".npm") => ("package_cache", PACKAGE_CACHE_REASON),
+                        "cache" if d.path.ends_with("/.cargo/registry/cache") => ("package_cache", PACKAGE_CACHE_REASON),
+                        _ => return None,
+                    };
+                    self.cleanup_path_allowed(path).ok()?;
+                    Some(CleanupLocation {
+                        path: d.path,
+                        category: category.into(),
+                        reason: reason.into(),
+                        logical_bytes: d.logical_bytes,
+                        allocated_bytes: d.allocated_bytes,
+                        modified_at: d.modified_at,
+                    })
+                })
+                .collect();
+            // A folder inside another one is already counted in it.
+            found.sort_by(|a, b| a.path.cmp(&b.path));
+            let mut kept: Vec<CleanupLocation> = Vec::with_capacity(found.len());
+            for loc in found {
+                if kept.last().is_some_and(|k| loc.path.starts_with(&format!("{}/", k.path))) {
+                    continue;
+                }
+                kept.push(loc);
+            }
+            kept.sort_by(|a, b| b.logical_bytes.cmp(&a.logical_bytes).then_with(|| a.path.cmp(&b.path)));
+            Ok(kept)
+        };
+        match scope {
+            None => self.cached("cleanup_locations", find),
+            Some(_) => find(),
+        }
     }
     pub fn cleanup_candidates(&self, query: &FileQuery) -> Result<Page<CleanupCandidate>> {
         let rule = RegeneratableRule;

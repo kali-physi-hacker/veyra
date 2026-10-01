@@ -151,6 +151,7 @@ enum Payload {
     Overview(StorageExplanation),
     Files(domain::Page<Entry>),
     Candidates(domain::Page<CleanupCandidate>, Vec<CleanupOperation>),
+    Locations(Vec<CleanupLocation>, Vec<CleanupOperation>),
     Breakdown(DirectoryBreakdown),
     Apps(Vec<Application>),
     Duplicates(DuplicateReport),
@@ -206,6 +207,8 @@ struct App {
     overview: Option<StorageExplanation>,
     files: Vec<Entry>,
     candidates: Vec<CleanupCandidate>,
+    /// Folders the cleanup rules recognise, shown before any one is opened.
+    locations: Vec<CleanupLocation>,
     apps: Vec<Application>,
     duplicates: Option<DuplicateReport>,
     system: Option<SystemSnapshot>,
@@ -294,6 +297,7 @@ impl App {
             overview: None,
             files: vec![],
             candidates: vec![],
+            locations: vec![],
             apps: vec![],
             duplicates: None,
             system: None,
@@ -368,6 +372,12 @@ impl App {
         self.queries.request();
         self.launch_query();
     }
+    /// Newer data for the page already open, as while a scan fills it: the answer on its way is
+    /// still shown, then this refresh runs.
+    fn refresh_live(&mut self) {
+        self.queries.refresh();
+        self.launch_query();
+    }
     fn launch_query(&mut self) {
         let Some(revision) = self.queries.begin() else {
             return;
@@ -424,6 +434,10 @@ impl App {
                     })?)),
                     Page::Map if path.is_empty() => Ok(Payload::Unindexed),
                     Page::Map => Ok(Payload::Breakdown(e.directory_breakdown(&path, 60)?)),
+                    Page::Cleanup if scope.is_none() => Ok(Payload::Locations(
+                        e.cleanup_locations(None)?,
+                        e.cleanup_operations()?,
+                    )),
                     Page::Cleanup => Ok(Payload::Candidates(
                         e.cleanup_candidates(&FileQuery {
                             path: scope,
@@ -499,7 +513,7 @@ impl App {
                         && self.last_live_refresh.elapsed() >= std::time::Duration::from_millis(900)
                     {
                         self.last_live_refresh = Instant::now();
-                        self.refresh();
+                        self.refresh_live();
                     }
                 }
                 Ok(OperationEvent::ScanCompleted { scan }) => {
@@ -530,8 +544,11 @@ impl App {
         while let Ok(message) = self.rx.try_recv() {
             let result = match message {
                 Message::Query(revision, result) => {
-                    if !self.queries.finish(revision) {
-                        self.launch_query();
+                    let current = self.queries.finish(revision);
+                    // Start whatever was asked for meanwhile, then show this answer if it still
+                    // describes the open view.
+                    self.launch_query();
+                    if !current {
                         continue;
                     }
                     result
@@ -570,6 +587,12 @@ impl App {
                     Payload::Candidates(v, operations) => {
                         self.candidates = v.items;
                         self.has_more = v.has_more;
+                        self.operations = operations;
+                    }
+                    Payload::Locations(v, operations) => {
+                        self.locations = v;
+                        self.candidates.clear();
+                        self.has_more = false;
                         self.operations = operations;
                     }
                     Payload::Apps(v) => self.apps = v,

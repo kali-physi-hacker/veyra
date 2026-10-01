@@ -131,6 +131,11 @@ enum AppCommand {
 enum CleanupCommand {
     Analyze(QueryArgs),
     Candidates(QueryArgs),
+    /// Folders whose files the cleanup rules recognise, largest first.
+    Locations {
+        #[arg(long)]
+        path: Option<String>,
+    },
     Plan {
         #[arg(long, required = true)]
         path: Vec<String>,
@@ -433,7 +438,7 @@ async fn run(cli: Cli) -> Result<Option<serde_json::Value>> {
         Command::Storage{command:Some(c)}=>match c{StorageCommand::Breakdown{path,limit}=>value(engine.directory_breakdown(&path,limit)?),StorageCommand::Largest(q)|StorageCommand::LargestFiles(q)=>value(engine.files(&q.query(Some("file")))?),StorageCommand::LargestDirs(q)=>value(engine.files(&q.query(Some("directory")))?),StorageCommand::Categories=>value(engine.categories()?),StorageCommand::History{path,since}=>value(engine.history(path.as_deref(),since)?)},
         Command::Duplicates{command:Some(DuplicateCommand::Scan)}=>value(engine.discover_duplicates(&stop)?),Command::Duplicates{command:None}=>value(engine.duplicates()?),Command::Duplicates{command:Some(DuplicateCommand::Groups{limit,offset})}=>value(engine.duplicate_groups(limit,offset)?),
         Command::Apps{command:None}=>value(engine.applications()?),Command::Apps{command:Some(AppCommand::Inspect{id})}=>value(engine.inspect_application(&id)?),Command::Apps{command:Some(AppCommand::UninstallPlan{id})}=>engine.uninstall_plan(&id),
-        Command::Cleanup{command}=>match command{CleanupCommand::Analyze(q)|CleanupCommand::Candidates(q)=>value(engine.cleanup_candidates(&q.query(Some("file")))?),CleanupCommand::Plan{path}=>value(engine.create_cleanup_plan(PlanRequest{paths:path})?),CleanupCommand::Show{id}=>value(engine.cleanup_plan(&id)?),CleanupCommand::Execute{id,approve}=>value(engine.execute_cleanup_plan(&id,&approve)?),CleanupCommand::Undo{id}=>value(engine.undo_cleanup(&id)?),CleanupCommand::Operation{id}=>value(engine.cleanup_operation(&id)?)},
+        Command::Cleanup{command}=>match command{CleanupCommand::Analyze(q)|CleanupCommand::Candidates(q)=>value(engine.cleanup_candidates(&q.query(Some("file")))?),CleanupCommand::Locations{path}=>value(engine.cleanup_locations(path.as_deref())?),CleanupCommand::Plan{path}=>value(engine.create_cleanup_plan(PlanRequest{paths:path})?),CleanupCommand::Show{id}=>value(engine.cleanup_plan(&id)?),CleanupCommand::Execute{id,approve}=>value(engine.execute_cleanup_plan(&id,&approve)?),CleanupCommand::Undo{id}=>value(engine.undo_cleanup(&id)?),CleanupCommand::Operation{id}=>value(engine.cleanup_operation(&id)?)},
         Command::Insights{command:None}=>value(engine.insights()?),Command::Insights{command:Some(InsightCommand::Explain{id})}=>value(engine.insights()?.into_iter().find(|i|i.id==id).ok_or_else(||Error::new("not_found","Insight not found"))?),
         Command::System=>value(engine.system()),Command::Process{command:ProcessCommand::Top{limit}}=>value(engine.system().processes.into_iter().take(limit).collect::<Vec<_>>()),Command::Process{command:ProcessCommand::Inspect{pid}}=>value(engine.system().processes.into_iter().find(|p|p.pid==pid).ok_or_else(||Error::new("not_found","Process not visible"))?),
         Command::Audit{limit,offset}=>value(engine.audit(limit,offset)?),Command::Api{command:ApiCommand::Token}=>value(serde_json::json!({"token":stratum_api::local_token(&engine)?})),
