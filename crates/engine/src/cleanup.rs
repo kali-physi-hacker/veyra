@@ -9,7 +9,7 @@ use std::{
 use stratum_domain::*;
 use stratum_platform::{
     scanner::identity,
-    secure_fs::{hash_file, open_regular, rename_no_replace},
+    secure_fs::{hash_file, open_regular, remove_regular, rename_no_replace},
 };
 
 impl Engine {
@@ -222,6 +222,7 @@ impl Engine {
                     error: None,
                 })
                 .collect(),
+            purged_at: None,
         };
         self.store.put("operation", &operation.id, &operation)?;
         self.store.put("executed_plan", plan_id, &operation.id)?;
@@ -325,6 +326,17 @@ impl Engine {
     pub fn undo_cleanup(&self, operation_id: &str) -> Result<CleanupOperation> {
         let _guard = self.writer_lock()?;
         let mut operation = self.cleanup_operation(operation_id)?;
+        if !operation.restorable()
+            && operation
+                .items
+                .iter()
+                .any(|i| matches!(i.status.as_str(), "purged" | "missing"))
+        {
+            return Err(Error::new(
+                "conflict",
+                "These files were permanently deleted; nothing is left to restore",
+            ));
+        }
         self.store.audit(
             "restore_started",
             operation_id,
@@ -332,7 +344,7 @@ impl Engine {
         )?;
         for i in 0..operation.items.len() {
             let item = &mut operation.items[i];
-            if item.status == "restored" || item.status == "pending" || item.status == "failed" {
+            if !item.restorable() {
                 continue;
             }
             let result = (|| -> Result<()> {
@@ -401,6 +413,168 @@ impl Engine {
         for root in self.store.roots()? {
             self.store.mark_stale(&root)?;
         }
+        Ok(operation)
+    }
+    /// The earliest time this operation's files may be purged: `purge_after_hours` after the
+    /// quarantine began.
+    pub fn purge_ready_at(&self, operation: &CleanupOperation) -> i64 {
+        let hours = i64::try_from(self.config.purge_after_hours).unwrap_or(i64::MAX);
+        operation
+            .created_at
+            .saturating_add(hours.saturating_mul(3600))
+    }
+    /// Permanently deletes what one quarantine operation still holds. Nothing is ever deleted
+    /// in place: only files this operation moved into Stratum's private quarantine qualify, each
+    /// only while it still matches the content hash and identity recorded when it moved, and
+    /// only once `purge_phrase(operation_id)` is given, separately from the phrase that approved
+    /// the move. Each file's intent and outcome are journaled and audited. There is no undo.
+    pub fn purge_quarantine(&self, operation_id: &str, approval: &str) -> Result<CleanupOperation> {
+        let _guard = self.writer_lock()?;
+        let mut operation = self.cleanup_operation(operation_id)?;
+        let phrase = purge_phrase(&operation.id);
+        if approval != phrase {
+            return Err(Error::new(
+                "approval_required",
+                format!("Explicit approval must equal {phrase}"),
+            ));
+        }
+        let held: Vec<usize> = (0..operation.items.len())
+            .filter(|&i| operation.items[i].purgeable())
+            .collect();
+        if held.is_empty() {
+            return Err(Error::new(
+                "conflict",
+                "Nothing from this operation is still in quarantine",
+            ));
+        }
+        let wait = self.purge_ready_at(&operation).saturating_sub(now());
+        if wait > 0 {
+            let minutes = (wait + 59) / 60;
+            return Err(Error::new(
+                "conflict",
+                format!(
+                    "Files stay in quarantine for {} h before they can be purged; this operation is ready in {} h {} min",
+                    self.config.purge_after_hours,
+                    minutes / 60,
+                    minutes % 60
+                ),
+            ));
+        }
+        let folder = self.quarantine_dir()?.join(&operation.id);
+        let interrupted: Vec<bool> = held
+            .iter()
+            .map(|&i| operation.items[i].status == "purging")
+            .collect();
+        let bytes: u64 = held.iter().map(|&i| operation.items[i].identity.size).sum();
+        // Journal the intent before the first deletion: after a crash, `purging` with nothing
+        // left at the destination means the deletion happened.
+        for &i in &held {
+            operation.items[i].status = "purging".into();
+        }
+        operation.status = "purging".into();
+        self.store.put("operation", &operation.id, &operation)?;
+        self.store.audit(
+            "purge_started",
+            &operation.id,
+            &format!(
+                "{} files, {bytes} bytes; permanent deletion approved",
+                held.len()
+            ),
+        )?;
+        self.emit(OperationEvent::PurgeStarted {
+            operation_id: operation.id.clone(),
+        });
+        for (n, &i) in held.iter().enumerate() {
+            let item = &mut operation.items[i];
+            let destination = Path::new(&item.destination);
+            let outcome = (|| -> Result<&'static str> {
+                // Only this operation's own quarantine folder is ever touched.
+                if destination.parent() != Some(folder.as_path()) {
+                    return Err(Error::new(
+                        "protected_path",
+                        "The recorded destination is outside this operation's quarantine folder",
+                    ));
+                }
+                if fs::symlink_metadata(destination)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Ok(if interrupted[n] { "purged" } else { "missing" });
+                }
+                let (hash, current) = hash_file(destination, false, || false)?;
+                if hash != item.hash
+                    || current.device != item.identity.device
+                    || current.inode != item.identity.inode
+                    || current.size != item.identity.size
+                    || current.modified_ns != item.identity.modified_ns
+                    || current.links != 1
+                {
+                    return Err(Error::new(
+                        "filesystem_changed",
+                        "The quarantined file no longer matches what was moved; nothing was deleted",
+                    ));
+                }
+                remove_regular(destination, &current)?;
+                Ok("purged")
+            })();
+            match outcome {
+                Ok(status) => {
+                    item.status = status.into();
+                    item.error = (status == "missing").then(|| {
+                        "Nothing was at the quarantine destination; it was removed outside Stratum"
+                            .into()
+                    });
+                }
+                Err(e) => {
+                    item.status = "purge_failed".into();
+                    item.error = Some(e.to_string());
+                }
+            }
+            self.store.audit(
+                "purge_item",
+                &operation.id,
+                &format!("{}: {}", item.source, item.status),
+            )?;
+            self.emit(OperationEvent::PurgeProgress {
+                operation_id: operation.id.clone(),
+                path: item.source.clone(),
+                status: item.status.clone(),
+            });
+            if n % 100 == 99 {
+                self.store.put("operation", &operation.id, &operation)?;
+            }
+        }
+        // The operation's folder goes once it is empty; anything still in it stays for review.
+        let _ = fs::remove_dir(&folder);
+        let left = operation
+            .items
+            .iter()
+            .any(|i| i.purgeable() || matches!(i.status.as_str(), "moving" | "needs_review"));
+        operation.status = if left { "purge_partial" } else { "purged" }.into();
+        operation.purged_at = Some(now());
+        self.store.put("operation", &operation.id, &operation)?;
+        let deleted = held
+            .iter()
+            .filter(|&&i| operation.items[i].status == "purged")
+            .count();
+        let freed: u64 = held
+            .iter()
+            .map(|&i| &operation.items[i])
+            .filter(|i| i.status == "purged")
+            .map(|i| i.identity.size)
+            .sum();
+        self.store.audit(
+            "purge_completed",
+            &operation.id,
+            &format!(
+                "{}: {deleted} files, {freed} bytes deleted",
+                operation.status
+            ),
+        )?;
+        self.emit(OperationEvent::PurgeCompleted {
+            operation_id: operation.id.clone(),
+            status: operation.status.clone(),
+            bytes: freed,
+        });
         Ok(operation)
     }
 }

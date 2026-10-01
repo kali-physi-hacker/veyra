@@ -199,6 +199,19 @@ pub enum OperationEvent {
         operation_id: String,
         status: String,
     },
+    PurgeStarted {
+        operation_id: String,
+    },
+    PurgeProgress {
+        operation_id: String,
+        path: String,
+        status: String,
+    },
+    PurgeCompleted {
+        operation_id: String,
+        status: String,
+        bytes: u64,
+    },
     IndexChanged {
         root: String,
         freshness: String,
@@ -399,6 +412,10 @@ pub struct Job {
     pub result: Option<serde_json::Value>,
     pub error: Option<serde_json::Value>,
 }
+/// One file of a quarantine operation. `status` moves through `pending`, `moving`, then
+/// `quarantined` (or `failed` / `needs_review`); a restore leaves `restored` or `restore_failed`;
+/// a purge leaves `purged`, `purge_failed`, or `missing` when something outside Stratum had
+/// already removed the quarantined copy. `purging` marks a deletion that was under way.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct QuarantineItem {
     pub source: String,
@@ -408,6 +425,23 @@ pub struct QuarantineItem {
     pub status: String,
     pub error: Option<String>,
 }
+impl QuarantineItem {
+    /// Stratum still holds this file's bytes in quarantine, so a purge may delete them.
+    pub fn purgeable(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "quarantined" | "restore_failed" | "purging" | "purge_failed"
+        )
+    }
+    /// A restore has something to try: everything except files that never moved, are already
+    /// back, or are gone for good.
+    pub fn restorable(&self) -> bool {
+        !matches!(
+            self.status.as_str(),
+            "restored" | "pending" | "failed" | "purged" | "missing"
+        )
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CleanupOperation {
     pub id: String,
@@ -415,6 +449,35 @@ pub struct CleanupOperation {
     pub created_at: i64,
     pub status: String,
     pub items: Vec<QuarantineItem>,
+    /// When a purge last finished; `None` until the first purge.
+    #[serde(default)]
+    pub purged_at: Option<i64>,
+}
+impl CleanupOperation {
+    /// Files still in quarantine that a purge would delete.
+    pub fn purgeable(&self) -> impl Iterator<Item = &QuarantineItem> {
+        self.items.iter().filter(|i| i.purgeable())
+    }
+    /// Bytes a purge would delete, by the sizes recorded when the files moved.
+    pub fn purgeable_bytes(&self) -> u64 {
+        self.purgeable().map(|i| i.identity.size).sum()
+    }
+    /// Bytes this operation's purges have deleted.
+    pub fn purged_bytes(&self) -> u64 {
+        self.items
+            .iter()
+            .filter(|i| i.status == "purged")
+            .map(|i| i.identity.size)
+            .sum()
+    }
+    pub fn restorable(&self) -> bool {
+        self.items.iter().any(QuarantineItem::restorable)
+    }
+}
+/// The phrase that authorizes permanently deleting what a quarantine operation holds. It names
+/// the operation, so it is separate from the `QUARANTINE <plan>` phrase that moved the files.
+pub fn purge_phrase(operation_id: &str) -> String {
+    format!("PURGE {operation_id}")
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditRecord {
@@ -520,6 +583,9 @@ pub struct Config {
     pub monitoring_interval_seconds: u64,
     pub reconciliation_seconds: u64,
     pub api_bind: String,
+    /// Hours files must spend in quarantine before a purge may delete them; 0 allows a purge
+    /// as soon as the quarantine finishes.
+    pub purge_after_hours: u64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -539,6 +605,7 @@ impl Default for Config {
             monitoring_interval_seconds: 10,
             reconciliation_seconds: 3600,
             api_bind: "127.0.0.1:7391".into(),
+            purge_after_hours: 0,
         }
     }
 }

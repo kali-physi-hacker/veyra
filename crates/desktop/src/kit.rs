@@ -1446,9 +1446,12 @@ pub fn audit_style(p: &Palette, action: &str) -> (&'static str, Color32) {
 /// Colour for a scan, plan or quarantine status word.
 pub fn status_color(p: &Palette, status: &str) -> Color32 {
     match status {
-        "completed" | "restored" | "probably_fresh" | "verified" | "moved" => p.teal,
-        "partial" | "stale" | "pending" | "running" => p.amber,
-        "failed" | "cancelled" | "conflict" | "error" | "skipped" => p.rose,
+        "completed" | "restored" | "probably_fresh" | "verified" | "moved" | "quarantined"
+        | "purged" => p.teal,
+        "partial" | "stale" | "pending" | "running" | "purging" | "purge_partial"
+        | "restore_partial" | "missing" => p.amber,
+        "failed" | "cancelled" | "conflict" | "error" | "skipped" | "purge_failed"
+        | "restore_failed" | "needs_review" => p.rose,
         _ => p.text_3,
     }
 }

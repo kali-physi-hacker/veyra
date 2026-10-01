@@ -180,7 +180,10 @@ fn every_page_renders_fixture_data_at_wide_and_compact_widths() {
         ),
         (Page::Duplicates, &["Verify before deciding"]),
         (Page::System, &["CPU", "Memory", "Processes"]),
-        (Page::Cleanup, &["Choose files", "Cleanup folders", "Cargo build output"]),
+        (
+            Page::Cleanup,
+            &["Choose files", "Cleanup folders", "Cargo build output"],
+        ),
         (Page::Audit, &["Timeline", "scan"]),
     ];
     for (page, needles) in expectations {
@@ -273,7 +276,11 @@ fn cleanup_requires_the_exact_phrase_then_quarantines_and_restores() {
     go(&mut app, Page::Cleanup);
     // The page opens on the folders the rules recognise, found in the index without paging.
     assert_eq!(app.locations.len(), 1, "{:?}", app.locations);
-    assert!(app.locations[0].path.ends_with("Projects/atlas/target"), "{:?}", app.locations);
+    assert!(
+        app.locations[0].path.ends_with("Projects/atlas/target"),
+        "{:?}",
+        app.locations
+    );
     assert!(app.candidates.is_empty());
     key(&mut app, KeyCode::Enter);
     settle(&mut app);
@@ -282,7 +289,10 @@ fn cleanup_requires_the_exact_phrase_then_quarantines_and_restores() {
         "the opened folder must list its Cargo artifacts"
     );
     let text = screen(&mut app, 120, 36);
-    assert!(text.contains("all folders"), "the way back to every folder must be shown\n{text}");
+    assert!(
+        text.contains("all folders"),
+        "the way back to every folder must be shown\n{text}"
+    );
     assert!(app.selected.is_empty(), "nothing may be preselected");
     press(&mut app, 'x');
     assert_eq!(app.selected.len(), 1);
@@ -428,4 +438,76 @@ fn dump_screens() {
         "===== first run · 120x34 =====\n{}",
         screen(&mut empty, 120, 34)
     );
+}
+
+#[test]
+fn purge_takes_its_own_phrase_and_deletes_only_quarantined_files() {
+    let harness = fixture();
+    let mut app = App::new(harness.engine.clone(), Theme::truecolor());
+    settle(&mut app);
+    go(&mut app, Page::Cleanup);
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    press(&mut app, 'A');
+    settle(&mut app);
+    assert_eq!(
+        app.selected.len(),
+        4,
+        "every artifact in the folder is among the largest 1,000"
+    );
+    press(&mut app, 'p');
+    settle(&mut app);
+    let plan = app.plan.clone().expect("plan should be created");
+    for c in plan.approval_phrase.chars() {
+        press(&mut app, c);
+    }
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    let operation = app.operation.clone().expect("quarantine should run");
+    assert!(
+        operation
+            .items
+            .iter()
+            .all(|i| std::path::Path::new(&i.destination).is_file())
+    );
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("delete permanently"), "{text}");
+    press(&mut app, 'D');
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("this cannot be undone"), "{text}");
+    let phrase = stratum_engine::domain::purge_phrase(&operation.id);
+    assert!(text.contains(&phrase), "{text}");
+    for c in plan.approval_phrase.chars() {
+        press(&mut app, c);
+    }
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    assert_eq!(
+        app.operation.as_ref().unwrap().status,
+        "completed",
+        "the quarantine phrase must not purge"
+    );
+    assert!(
+        operation
+            .items
+            .iter()
+            .all(|i| std::path::Path::new(&i.destination).is_file())
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for c in phrase.chars() {
+        press(&mut app, c);
+    }
+    assert!(app.purge_matches());
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    let purged = app.operation.clone().unwrap();
+    assert_eq!(purged.status, "purged");
+    for item in &operation.items {
+        assert!(!std::path::Path::new(&item.destination).exists());
+        assert!(!std::path::Path::new(&item.source).exists());
+    }
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("deleted permanently"), "{text}");
+    press(&mut app, 'D');
+    assert!(!app.purge_open, "nothing is left to delete");
 }

@@ -29,6 +29,7 @@ All requests use `Authorization: Bearer <local token>`. Querying is read-only un
 | `/cleanup/plans/{id}/execute` | POST exact approval phrase; separate action capability |
 | `/cleanup/operations/{id}` | GET durable per-file action journal |
 | `/cleanup/operations/{id}/undo` | POST no-clobber restoration |
+| `/cleanup/operations/{id}/purge` | POST exact purge phrase; permanently deletes what the operation still holds in quarantine |
 | `/audit`, `/system/history` | GET action and resource history |
 | `/events` | GET authenticated SSE operation stream |
 
@@ -63,6 +64,14 @@ Submit to `POST /cleanup/plans`. Review returned items, evidence, risk, expiry a
 ```
 
 Submit to `POST /cleanup/plans/<plan-id>/execute`. Store the returned operation ID for status and undo. A plan is claimed only once. Repeating execution returns `conflict`; it never expands the selection. A multi-file operation may end `partial`; inspect every item before retrying or undoing. Permission errors, file replacement or expiry require another plan, not a forced override.
+
+Quarantine reclaims no space. To delete what an operation holds, permanently, obtain a second, explicit approval and send
+
+```json
+{"approval":"PURGE <operation-id>"}
+```
+
+to `POST /cleanup/operations/<operation-id>/purge`. Only files still in quarantine are deleted, each only while it matches the hash and identity recorded when it moved; a file that changed stays as `purge_failed`, and one already removed outside Stratum is reported `missing`. The operation ends `purged`, or `purge_partial` when something is left. A wrong phrase returns `approval_required`; nothing left in quarantine, or a configured `purge_after_hours` not yet elapsed, returns `conflict`. A purge cannot be undone, and restore then skips purged files.
 
 ## Errors and bounds
 

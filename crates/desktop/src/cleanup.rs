@@ -16,30 +16,9 @@ impl App {
         }
         card.show(ui, |ui| {
             ui.horizontal(|ui| {
-                kit::icon_tile(
-                    ui,
-                    if count > 0 {
-                        icons::CHECK_SQUARE
-                    } else {
-                        icons::SQUARE
-                    },
-                    if count > 0 { p.accent } else { p.text_3 },
-                    34.0,
-                );
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    kit::label(
-                        ui,
-                        format!("{count} selected · {}", bytes(selected_bytes)),
-                        14.5,
-                        Weight::SemiBold,
-                        p.text,
-                    );
-                    kit::caption(
-                        ui,
-                        "Selection is for reversible quarantine, not recovered capacity.",
-                    );
-                });
+                ui.set_min_height(36.0);
+                // The buttons are laid out first, from the right, so the summary on the left fits
+                // the space they leave instead of running under them in a narrow window.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if Button::primary("Create review plan")
                         .icon(icons::LIST_CHECKS)
@@ -72,6 +51,61 @@ impl App {
                             }
                         }
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        kit::icon_tile(
+                            ui,
+                            if count > 0 {
+                                icons::CHECK_SQUARE
+                            } else {
+                                icons::SQUARE
+                            },
+                            if count > 0 { p.accent } else { p.text_3 },
+                            34.0,
+                        );
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            let width = ui.available_width();
+                            for (text, size, weight, color) in [
+                                (
+                                    format!("{count} selected · {}", bytes(selected_bytes)),
+                                    14.5,
+                                    Weight::SemiBold,
+                                    p.text,
+                                ),
+                                (
+                                    "Quarantine first; deleting permanently is a separate step."
+                                        .to_string(),
+                                    12.0,
+                                    Weight::Regular,
+                                    p.text_3,
+                                ),
+                            ] {
+                                let galley = kit::galley_truncated(
+                                    ui,
+                                    &text,
+                                    fonts::font(size, weight),
+                                    color,
+                                    width,
+                                );
+                                let (rect, response) =
+                                    ui.allocate_exact_size(galley.size(), Sense::hover());
+                                let clipped = galley.size().x + 1.0
+                                    < ui.fonts_mut(|f| {
+                                        f.layout_no_wrap(
+                                            text.clone(),
+                                            fonts::font(size, weight),
+                                            color,
+                                        )
+                                        .size()
+                                        .x
+                                    });
+                                ui.painter().galley(rect.min, galley, color);
+                                if clipped {
+                                    response.on_hover_text(text);
+                                }
+                            }
+                        });
+                    });
                 });
             });
         });
@@ -103,7 +137,7 @@ impl App {
         kit::banner(
             ui,
             icons::ARCHIVE_BOX,
-            "Quarantine is reversible storage, not recovered capacity. Files move to Stratum's private storage on the same filesystem; permanent disposal is not supported. Stop active builds before moving generated files.",
+            "Quarantine moves files into Stratum's private storage on the same filesystem, where they can be restored; on its own it frees no space. Space comes back when you delete a quarantine permanently from its outcome, behind a second typed phrase. Stop active builds before moving generated files.",
             p.amber,
             false,
         );
@@ -112,12 +146,15 @@ impl App {
         } else {
             if let Some(scope) = self.cleanup_scope.clone() {
                 ui.horizontal(|ui| {
+                    // The two buttons need about 320 points; the path gives way to them.
+                    let room = ((ui.available_width() - 360.0) / 6.6).max(16.0) as usize;
                     kit::badge_icon(
                         ui,
                         Some(icons::FUNNEL),
-                        &format!("Scope · {}", short_path(&scope)),
+                        &format!("Scope · {}", truncate_middle(&short_path(&scope), room)),
                         p.accent,
-                    );
+                    )
+                    .on_hover_text(&scope);
                     if Button::ghost("All cleanup folders")
                         .small()
                         .show(ui)
@@ -126,6 +163,27 @@ impl App {
                         self.cleanup_scope = None;
                         self.offset = 0;
                         self.refresh();
+                    }
+                    if Button::ghost("Select largest 1,000")
+                        .small()
+                        .icon(icons::SORT_DESCENDING)
+                        .enabled(!self.busy)
+                        .show(ui)
+                        .on_hover_text(
+                            "Replace the selection with the thousand largest candidate files in this folder, the most one plan reviews",
+                        )
+                        .clicked()
+                    {
+                        self.task(Activity::Generic, move |e| {
+                            Ok(Payload::Selection(
+                                e.cleanup_candidates(&FileQuery {
+                                    path: Some(scope),
+                                    limit: 1000,
+                                    ..Default::default()
+                                })?
+                                .items,
+                            ))
+                        });
                     }
                 });
             }
@@ -173,13 +231,29 @@ impl App {
                                 p.teal,
                             );
                             kit::badge_icon(ui, Some(icons::WARNING), "Moderate risk", p.amber);
-                            kit::badge(ui, &format!("{} files on this page", items.len()), p.text_3);
+                            kit::badge(
+                                ui,
+                                &format!("{} files on this page", items.len()),
+                                p.text_3,
+                            );
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                 ui.vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 2.0;
-                                    kit::label(ui, humanize(&category), 15.0, Weight::SemiBold, p.text);
+                                    kit::label(
+                                        ui,
+                                        humanize(&category),
+                                        15.0,
+                                        Weight::SemiBold,
+                                        p.text,
+                                    );
                                     if let Some(first) = items.first() {
-                                        kit::label(ui, &first.reason, 12.5, Weight::Regular, p.text_2);
+                                        kit::label(
+                                            ui,
+                                            &first.reason,
+                                            12.5,
+                                            Weight::Regular,
+                                            p.text_2,
+                                        );
                                     }
                                 });
                             });
@@ -206,7 +280,7 @@ impl App {
         ui.add_space(8.0);
         kit::disclosure(
             ui,
-            "Previous operations & restoration",
+            "Previous operations: restore or delete",
             "operations",
             |ui| {
                 let mut load = None;
@@ -214,15 +288,18 @@ impl App {
                     kit::caption(ui, "No quarantine operations have been recorded yet.");
                 }
                 for operation in &self.operations {
-                    let (icon, color) = if operation.status == "restored" {
-                        (icons::ARROW_COUNTER_CLOCKWISE, p.teal)
-                    } else {
-                        (icons::ARCHIVE_BOX, kit::status_color(&p, &operation.status))
-                    };
+                    let icon = operation_icon(&operation.status);
+                    let color = kit::status_color(&p, &operation.status);
+                    let held = operation.purgeable_bytes();
                     if Row::new(format!(
-                        "{} · {} files",
+                        "{} · {} files{}",
                         humanize(&operation.status),
-                        operation.items.len()
+                        operation.items.len(),
+                        if held > 0 {
+                            format!(" · {} in quarantine", bytes(held))
+                        } else {
+                            String::new()
+                        }
                     ))
                     .plain_icon(icon, color)
                     .mono_subtitle(&operation.id)
@@ -452,18 +529,12 @@ impl App {
     fn operation_view(&mut self, ui: &mut egui::Ui, operation: &CleanupOperation) {
         let p = self.palette;
         let color = kit::status_color(&p, &operation.status);
+        let held = operation.purgeable().count();
+        let held_bytes = operation.purgeable_bytes();
+        let purged_bytes = operation.purged_bytes();
         Card::new().padding(22.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                kit::icon_tile(
-                    ui,
-                    if operation.status == "restored" {
-                        icons::ARROW_COUNTER_CLOCKWISE
-                    } else {
-                        icons::ARCHIVE_BOX
-                    },
-                    color,
-                    42.0,
-                );
+                kit::icon_tile(ui, operation_icon(&operation.status), color, 42.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     kit::eyebrow(ui, "Operation outcome");
@@ -489,33 +560,38 @@ impl App {
                             ui.ctx().copy_text(operation.id.clone());
                         }
                     });
+                    if let Some(summary) = holdings(operation, held, held_bytes, purged_bytes) {
+                        kit::caption(ui, summary);
+                    }
                 });
             });
             ui.add_space(8.0);
-            for item in &operation.items {
-                let (icon, color) = match item.status.as_str() {
-                    "restored" => (icons::ARROW_COUNTER_CLOCKWISE, p.teal),
-                    "moved" | "completed" => (icons::CHECK_CIRCLE, p.teal),
-                    "pending" => (icons::CIRCLE_DASHED, p.amber),
-                    _ => (icons::X_CIRCLE, p.rose),
-                };
-                Row::new(file_name(&item.source))
-                    .plain_icon(icon, color)
-                    .mono_subtitle(short_path(&item.source))
-                    .badge(humanize(&item.status), color)
-                    .height(46.0)
-                    .enabled(false)
-                    .show(ui)
-                    .on_hover_text(format!("{}\n→ {}", item.source, item.destination));
-                if let Some(error) = &item.error {
-                    kit::label(ui, error, 12.0, Weight::Medium, p.rose);
-                }
-            }
+            egui::ScrollArea::vertical()
+                .id_salt("operation-files")
+                .max_height(280.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for item in &operation.items {
+                        let (icon, color) = item_style(&p, &item.status);
+                        Row::new(file_name(&item.source))
+                            .plain_icon(icon, color)
+                            .mono_subtitle(short_path(&item.source))
+                            .trailing(bytes(item.identity.size), p.text_2)
+                            .badge(humanize(&item.status), color)
+                            .height(46.0)
+                            .enabled(false)
+                            .show(ui)
+                            .on_hover_text(format!("{}\n→ {}", item.source, item.destination));
+                        if let Some(error) = &item.error {
+                            kit::label(ui, error, 12.0, Weight::Medium, p.rose);
+                        }
+                    }
+                });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if Button::primary("Restore quarantined files")
                     .icon(icons::ARROW_COUNTER_CLOCKWISE)
-                    .enabled(!self.busy && operation.items.iter().any(|i| i.status != "restored"))
+                    .enabled(!self.busy && operation.restorable())
                     .show(ui)
                     .clicked()
                 {
@@ -524,16 +600,182 @@ impl App {
                         Ok(Payload::Operation(e.undo_cleanup(&id)?))
                     });
                 }
+                if held > 0
+                    && !self.purge_open
+                    && Button::danger("Delete permanently…")
+                        .icon(icons::TRASH)
+                        .enabled(!self.busy)
+                        .show(ui)
+                        .clicked()
+                {
+                    self.purge_open = true;
+                    self.purge_typed.clear();
+                }
                 if Button::ghost("Back to candidates")
                     .icon(icons::ARROW_LEFT)
                     .show(ui)
                     .clicked()
                 {
                     self.operation = None;
+                    self.purge_open = false;
+                    self.purge_typed.clear();
                     self.refresh();
                 }
             });
+            if self.purge_open && held > 0 {
+                self.purge_confirmation(ui, operation, held, held_bytes);
+            }
         });
+    }
+    /// The separate, typed authorization for deleting what an operation holds in quarantine.
+    fn purge_confirmation(
+        &mut self,
+        ui: &mut egui::Ui,
+        operation: &CleanupOperation,
+        held: usize,
+        held_bytes: u64,
+    ) {
+        let p = self.palette;
+        let phrase = purge_phrase(&operation.id);
+        let wait = self.engine.purge_ready_at(operation).saturating_sub(now());
+        ui.add_space(14.0);
+        Card::new()
+            .tinted(p.rose)
+            .padding(16.0)
+            .radius(12.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    kit::icon_tile(ui, icons::TRASH, p.rose, 36.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        kit::label(
+                            ui,
+                            format!(
+                                "Delete {held} file{} permanently · {}",
+                                if held == 1 { "" } else { "s" },
+                                bytes(held_bytes)
+                            ),
+                            16.0,
+                            Weight::SemiBold,
+                            p.text,
+                        );
+                        kit::caption(
+                            ui,
+                            "This cannot be undone: the files skip the Trash and Stratum cannot restore them. Each file is checked against the content hash recorded when it moved, and anything that changed stays in quarantine.",
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+                if wait > 0 {
+                    kit::banner(
+                        ui,
+                        icons::HOURGLASS,
+                        &format!(
+                            "Files stay in quarantine for {} h before they can be deleted. This operation is ready in {}.",
+                            self.engine.config.purge_after_hours,
+                            duration(wait)
+                        ),
+                        p.amber,
+                        false,
+                    );
+                } else {
+                    kit::label(
+                        ui,
+                        "Authorization is separate from the quarantine. Type the phrase exactly to delete these files:",
+                        13.0,
+                        Weight::Regular,
+                        p.text_2,
+                    );
+                    Card::new()
+                        .fill(p.sunken)
+                        .padding(10.0)
+                        .radius(10.0)
+                        .shrink()
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&phrase)
+                                    .font(fonts::mono_medium(14.0))
+                                    .color(p.rose),
+                            );
+                        });
+                    let width = ui.available_width().min(520.0);
+                    kit::text_field(
+                        ui,
+                        &mut self.purge_typed,
+                        "Type the purge phrase",
+                        Some(icons::LOCK_KEY),
+                        width,
+                        true,
+                    );
+                    ui.add_space(4.0);
+                }
+                ui.horizontal(|ui| {
+                    if wait <= 0
+                        && Button::danger("Delete permanently")
+                            .icon(icons::TRASH)
+                            .enabled(!self.busy && self.purge_typed == phrase)
+                            .show(ui)
+                            .clicked()
+                    {
+                        let id = operation.id.clone();
+                        let approval = self.purge_typed.clone();
+                        self.task(Activity::Purge, move |e| {
+                            Ok(Payload::Operation(e.purge_quarantine(&id, &approval)?))
+                        });
+                    }
+                    if Button::ghost("Keep in quarantine")
+                        .enabled(!self.busy)
+                        .show(ui)
+                        .clicked()
+                    {
+                        self.purge_open = false;
+                        self.purge_typed.clear();
+                    }
+                });
+            });
+    }
+}
+
+/// What an operation still holds, and what its purges have deleted.
+fn holdings(
+    operation: &CleanupOperation,
+    held: usize,
+    held_bytes: u64,
+    purged_bytes: u64,
+) -> Option<String> {
+    let deleted = match operation.purged_at {
+        Some(at) if purged_bytes > 0 => Some(format!(
+            "{} deleted permanently {}",
+            bytes(purged_bytes),
+            age(at)
+        )),
+        _ => None,
+    };
+    match (held, deleted) {
+        (0, deleted) => deleted,
+        (n, deleted) => Some(format!(
+            "{n} file{} · {} held in quarantine{}",
+            if n == 1 { "" } else { "s" },
+            bytes(held_bytes),
+            deleted.map(|d| format!(" · {d}")).unwrap_or_default()
+        )),
+    }
+}
+fn operation_icon(status: &str) -> &'static str {
+    match status {
+        "restored" => icons::ARROW_COUNTER_CLOCKWISE,
+        "purged" => icons::TRASH,
+        _ => icons::ARCHIVE_BOX,
+    }
+}
+fn item_style(p: &Palette, status: &str) -> (&'static str, egui::Color32) {
+    match status {
+        "restored" => (icons::ARROW_COUNTER_CLOCKWISE, p.teal),
+        "quarantined" | "moved" | "completed" => (icons::ARCHIVE_BOX, p.teal),
+        "purged" => (icons::TRASH, p.text_2),
+        "pending" | "moving" | "purging" => (icons::CIRCLE_DASHED, p.amber),
+        "missing" => (icons::QUESTION, p.amber),
+        _ => (icons::X_CIRCLE, p.rose),
     }
 }
 

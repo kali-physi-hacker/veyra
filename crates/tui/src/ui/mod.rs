@@ -419,7 +419,7 @@ fn modal(frame: &mut Frame, area: Rect, width: u16, height: u16) -> Rect {
 }
 fn render_help(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
-    let entries: [(&str, &str); 22] = [
+    let entries: [(&str, &str); 24] = [
         ("1-9  Tab  ⇧Tab", "switch pages"),
         ("↑ ↓  j k", "move selection"),
         ("PgUp PgDn  g G", "page · first · last"),
@@ -434,8 +434,10 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
         ("c", "review cleanup candidates here"),
         ("x  space", "toggle a cleanup candidate"),
         ("a  n", "select all on page · clear selection"),
+        ("A", "select the largest 1,000 candidates here"),
         ("p", "create an immutable cleanup plan"),
         ("u", "restore a quarantined operation"),
+        ("D", "delete a quarantine permanently (typed phrase)"),
         ("o", "previous operations · sort processes"),
         ("v", "verify duplicate content"),
         ("s", "scan a folder (read-only)"),
@@ -669,6 +671,15 @@ fn render_operations(frame: &mut Frame, app: &mut App, area: Rect) {
                 .iter()
                 .filter(|i| i.status == "restored")
                 .count();
+            let held = operation.purgeable_bytes();
+            let purged = operation.purged_bytes();
+            let state = if held > 0 {
+                format!("{} in quarantine", widgets::bytes(held))
+            } else if purged > 0 {
+                format!("{} deleted", widgets::bytes(purged))
+            } else {
+                format!("{restored} restored")
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     widgets::status_glyph(&operation.status),
@@ -684,9 +695,9 @@ fn render_operations(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(
                     format!(
-                        "{} files · {} restored · {}",
+                        "{} files · {} · {}",
                         operation.items.len(),
-                        restored,
+                        state,
                         widgets::age(operation.created_at)
                     ),
                     theme.muted(),
@@ -705,7 +716,7 @@ fn render_operations(frame: &mut Frame, app: &mut App, area: Rect) {
             .highlight_symbol("▌ ")
             .block(card(
                 &theme,
-                "Previous operations · Enter to inspect or restore",
+                "Previous operations · Enter to inspect, restore or delete",
             )),
         rect,
         &mut state,

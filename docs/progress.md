@@ -7,14 +7,14 @@
 - SQLite migrations, WAL, batched insertion, query indexes, generation reconciliation, historical directory totals and durable audit.
 - Largest files/directories, file filters and pagination, categories with confidence, staged duplicate hashing and cache invalidation, hard-link-aware duplicate groups.
 - Deterministic developer-storage and growth/anomaly rules; evidence-based macOS application footprint estimates and non-executable uninstall review proposals.
-- Conservative candidate discovery, immutable expiring plans, explicit approval, protected paths, same-filesystem quarantine, content/identity validation, per-item journal and no-clobber undo.
+- Conservative candidate discovery, immutable expiring plans, explicit approval, protected paths, same-filesystem quarantine, content/identity validation, per-item journal, no-clobber undo, and a separately authorized purge of quarantined files.
 - Native filesystem watching, leaf-level incremental updates, hash invalidation, periodic full reconciliation and low-detail system history.
 - Loopback bearer-authenticated API v1, background jobs, SSE events, typed domain errors and generated OpenAPI; no shell/SQL execution endpoint.
 - CLI JSON output, native desktop dashboard/explorer/map/cleanup/apps/duplicates/system/insights/history/audit, and a read-only TUI.
 
 ## Decisions
 
-The desktop is native Rust/egui; all clients use the same service layer. Initial traversal uses one bounded producer and one batched writer. A whole root generation remains invisible until publication. Filesystem events are advisory and never alone establish a perfectly fresh index. Cleanup intentionally handles individual verified files; broad recursive deletion and permanent purge are not implemented.
+The desktop is native Rust/egui; all clients use the same service layer. Initial traversal uses one bounded producer and one batched writer. A whole root generation remains invisible until publication. Filesystem events are advisory and never alone establish a perfectly fresh index. Cleanup intentionally handles individual verified files; broad recursive deletion is not implemented, and permanent deletion exists only as a separately authorized purge of files already in quarantine.
 
 ## Validation
 
@@ -53,7 +53,7 @@ The million-record directory query initially took 6.448 s; the query-index corre
 ## Known limits
 
 - This is a functioning developer release, not completion of every long-term feature in the original vision.
-- Quarantine retains disk usage. No permanent purge, automatic quarantine expiry, cross-volume move or executable bundle uninstall exists.
+- Quarantine retains disk usage until it is purged. No automatic purge or quarantine expiry, cross-volume move or executable bundle uninstall exists.
 - Index history is shallow directory aggregates, not full historical per-file attribution. Seven-day answers require an actual observation baseline.
 - Memory-pressure metrics, persistent per-process anomaly baselines, Docker/Podman internal ownership, authoritative unused/orphaned app detection and APFS exclusive block accounting are unavailable.
 - Windows platform execution, app signing/notarization and release distribution remain unverified.
@@ -64,7 +64,7 @@ The million-record directory query initially took 6.448 s; the query-index corre
 
 ## Upcoming work
 
-Broaden native platform adapters and ownership evidence, add per-group file pagination, introduce high-risk purge as a separately authorized operation, retain richer historical aggregate dimensions, validate large filesystem workloads on dedicated storage, and complete desktop accessibility/interaction coverage. MCP remains a thin future adapter over existing APIs.
+Broaden native platform adapters and ownership evidence, add per-group file pagination, retain richer historical aggregate dimensions, validate large filesystem workloads on dedicated storage, and complete desktop accessibility/interaction coverage. MCP remains a thin future adapter over existing APIs.
 
 ## Desktop, intelligence and optimization iteration — 2026-09-26
 
@@ -192,3 +192,37 @@ The Cleanup page in both interfaces asked the index for its hundred largest file
 
 The Home index (5,515,645 entries): `stratum cleanup locations` lists 11 folders holding 12.31 GB (11.72 GB in one project's `target`) in 0.74 s including process start; the first page of candidates in that folder takes 0.05 s. The old first page, the hundred largest files, held no candidates.
 
+
+## Permanent deletion from quarantine — 2026-10-02
+
+### Found
+
+Cleanup could only quarantine. Files moved into Stratum's private storage on the same filesystem, so the 12.31 GB of recognised build output and caches stayed on disk unless restored, and the safety contract listed purge as future work. Plans hold at most a thousand files, and the only bulk selection was the visible page of a hundred. The desktop outcome also drew successfully quarantined files with the failure icon.
+
+### Implemented
+
+- `Engine::purge_quarantine`, `stratum cleanup purge` and `POST /cleanup/operations/{id}/purge` permanently delete what one quarantine operation still holds. The phrase is `PURGE <operation-id>`, separate from `QUARANTINE <plan-id>`, and `purge_after_hours` (default 0) can require a minimum time in quarantine.
+- Each file must still match the hash and identity recorded after its move and sit directly inside its operation's quarantine folder. `secure_fs::remove_regular` re-checks identity and unlinks through the no-follow parent directory.
+- A `purging` intent is journaled before the first deletion. Files end `purged`, `purge_failed` or `missing`, the operation `purged` or `purge_partial`, and the start, every file and the completion are audited. Restore skips purged files and refuses an operation with nothing left in quarantine.
+- `stratum cleanup operations` lists every operation with what it still holds and its purge phrase.
+- Desktop: *Delete permanently…* on an operation's outcome opens a confirmation with the phrase, a typed field and, when one applies, the remaining wait. Quarantined files now show as held. *Select largest 1,000* replaces the selection with the thousand largest candidates in the opened folder.
+- Terminal: `D` opens the same confirmation and `A` selects the largest thousand.
+- Tests: the engine covers phrase separation, deletion, changed and missing copies, an interrupted purge, the waiting period and the folder boundary. The platform test covers replaced, symlinked and hard-linked files. The command line, desktop and terminal each walk a purge end to end, and the OpenAPI snapshot carries the route.
+
+### Measurements
+
+Release build on the development machine, with a synthetic Cargo `target` of 999 one-megabyte files (1.05 GB). Times include process start.
+
+| Step | Time |
+| --- | --- |
+| Plan, hashing every file | 1.73 s |
+| Quarantine | 3.58 s |
+| Purge | 1.07 s |
+
+The quarantine folder was empty afterwards, and the audit held one record per deleted file.
+
+### Limits
+
+- A purge only reaches files a quarantine has moved. Quarantine still takes a thousand files per plan, so a large `target` needs several rounds.
+- A same-user process that swaps a quarantined file between the final identity check and the unlink is outside what a local application can prevent. The quarantine folder is private to the user.
+- On APFS, local snapshots keep deleted blocks until they expire, so free space can lag a purge.

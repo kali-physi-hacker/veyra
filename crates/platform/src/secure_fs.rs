@@ -88,6 +88,50 @@ pub fn rename_no_replace(_source: &Path, _destination: &Path) -> Result<()> {
     ))
 }
 
+/// Permanently removes one regular file, anchored to its opened, no-follow parent directory,
+/// and only while the name still refers to the object the caller verified: the same device,
+/// inode, size and modification time, with a single link. The parent directory is synced so
+/// the removal is durable before the caller records it. A same-user process that swaps the name
+/// between this check and the unlink is outside what a local application can prevent.
+#[cfg(unix)]
+pub fn remove_regular(path: &Path, expected: &Identity) -> Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, unlinkat};
+    let (fd, name) = parent(path)?;
+    let file: File = openat(
+        &fd,
+        &name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| Error::io(e.into()))?
+    .into();
+    let metadata = file.metadata()?;
+    let current = crate::scanner::identity(&metadata);
+    if !metadata.is_file()
+        || current.device != expected.device
+        || current.inode != expected.inode
+        || current.size != expected.size
+        || current.modified_ns != expected.modified_ns
+        || current.links != 1
+    {
+        return Err(Error::new(
+            "filesystem_changed",
+            "The file changed after it was verified; nothing was deleted",
+        ));
+    }
+    drop(file);
+    unlinkat(&fd, &name, AtFlags::empty()).map_err(|e| Error::io(e.into()))?;
+    rustix::fs::fsync(&fd).map_err(|e| Error::io(e.into()))?;
+    Ok(())
+}
+#[cfg(not(unix))]
+pub fn remove_regular(_path: &Path, _expected: &Identity) -> Result<()> {
+    Err(Error::new(
+        "unsupported_platform_feature",
+        "Permanent deletion requires Unix in release 0.1",
+    ))
+}
+
 pub fn hash_file(
     path: &Path,
     sample: bool,

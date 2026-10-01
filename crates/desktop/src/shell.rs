@@ -462,6 +462,7 @@ impl App {
                                 Activity::Scan => "Scanning read-only",
                                 Activity::Duplicates => "Verifying duplicate content",
                                 Activity::Cleanup => "Quarantine in progress",
+                                Activity::Purge => "Deleting permanently",
                                 Activity::Generic => "Working locally",
                             };
                             kit::label(ui, title, 13.5, Weight::SemiBold, p.text);

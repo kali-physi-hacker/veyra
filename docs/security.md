@@ -6,7 +6,7 @@ The dedicated state directory is mode 0700 on Unix. The HTTP token is a random 2
 
 This is a single-user application. Processes running under that same account can generally read that account's state and may bypass application policies outside Stratum. Local bearer authentication protects against unauthenticated callers, not against a fully compromised user session. The service grants broad inspection capabilities; token holders can read indexed private paths and resource snapshots.
 
-Path queries use prepared parameters. File names are never interpolated into shell commands. No product operation spawns a shell. Cleanup uses explicit immutable selections, no-follow opens, atomic no-clobber rename, hashes, deny policies, bounded plan size, expiry, and durable per-item audit. Detailed destructive-operation limitations are in [cleanup safety](cleanup-safety.md).
+Path queries use prepared parameters. File names are never interpolated into shell commands. No product operation spawns a shell. Cleanup uses explicit immutable selections, no-follow opens, atomic no-clobber rename, hashes, deny policies, bounded plan size, expiry, and durable per-item audit. Permanent deletion is limited to quarantined copies, needs a phrase separate from the quarantine approval, and re-verifies each file before a descriptor-anchored unlink. Detailed destructive-operation limitations are in [cleanup safety](cleanup-safety.md).
 
 Partial scans, errors, unsupported platforms and absent baselines remain visible. Heuristic application relationships are labeled as estimates. The engine never infers unused software from mtime, and never infers disposable files from size or age alone. Memory pressure and unavailable platform measurements remain null with explanatory limitations.
 

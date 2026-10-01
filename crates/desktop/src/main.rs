@@ -163,6 +163,8 @@ enum Payload {
     Audit(Vec<AuditRecord>),
     Plan(CleanupPlan),
     Operation(CleanupOperation),
+    /// The largest candidates in the open folder, to become the whole selection.
+    Selection(Vec<CleanupCandidate>),
     Scanned(Vec<ScanRecord>),
 }
 enum Message {
@@ -181,6 +183,7 @@ enum Activity {
     Scan,
     Duplicates,
     Cleanup,
+    Purge,
     Generic,
 }
 struct App {
@@ -219,6 +222,9 @@ struct App {
     plan: Option<CleanupPlan>,
     operation: Option<CleanupOperation>,
     approval: String,
+    /// Whether the permanent-deletion confirmation is open, and the phrase typed into it.
+    purge_open: bool,
+    purge_typed: String,
     operation_lookup: String,
     uninstall: Option<serde_json::Value>,
     breakdown: Option<DirectoryBreakdown>,
@@ -308,6 +314,8 @@ impl App {
             plan: None,
             operation: None,
             approval: String::new(),
+            purge_open: false,
+            purge_typed: String::new(),
             operation_lookup: String::new(),
             uninstall: None,
             breakdown: None,
@@ -358,6 +366,7 @@ impl App {
             Activity::Scan => "Preparing read-only scan…".into(),
             Activity::Duplicates => "Hashing candidate files locally…".into(),
             Activity::Cleanup => "Validating files before any move…".into(),
+            Activity::Purge => "Checking each quarantined file before deleting it…".into(),
             Activity::Generic => "Working locally…".into(),
         };
         let engine = self.engine.clone();
@@ -618,14 +627,30 @@ impl App {
                         self.approval.clear();
                     }
                     Payload::Operation(v) => {
-                        self.status =
-                            format!("Operation {} · inspect the per-file outcome", v.status);
+                        self.status = if v.status.starts_with("purge") {
+                            format!(
+                                "Deleted {} permanently · inspect the per-file outcome",
+                                bytes(v.purged_bytes())
+                            )
+                        } else {
+                            format!("Operation {} · inspect the per-file outcome", v.status)
+                        };
                         self.operation_lookup = v.id.clone();
                         self.operation = Some(v);
                         self.plan = None;
                         self.approval.clear();
+                        self.purge_open = false;
+                        self.purge_typed.clear();
                         self.selected.clear();
                         self.refresh();
+                    }
+                    Payload::Selection(v) => {
+                        self.selected =
+                            v.into_iter().take(1000).map(|c| (c.path, c.size)).collect();
+                        self.status = format!(
+                            "Selected the {} largest candidates here · nothing has moved",
+                            self.selected.len()
+                        );
                     }
                     Payload::Scanned(records) => {
                         for scan in records {

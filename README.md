@@ -1,6 +1,6 @@
 # Stratum
 
-A local machine intelligence platform written in Rust. Stratum combines a persistent filesystem index, storage analysis, explainable rules, application footprints, system snapshots, and a conservative quarantine workflow. It does not require an AI model, account, cloud service, or permanent daemon.
+A local machine intelligence platform written in Rust. Stratum combines a persistent filesystem index, storage analysis, explainable rules, application footprints, system snapshots, and a conservative quarantine workflow with a separately authorized purge. It does not require an AI model, account, cloud service, or permanent daemon.
 
 This is a new **0.1 developer release**, with macOS as the primary target. See [progress and limitations](docs/progress.md) for the distinction between working capabilities and the longer-term product vision.
 
@@ -8,7 +8,7 @@ This is a new **0.1 developer release**, with macOS as the primary target. See [
 
 Screenshots use generated filesystem fixtures; capacity and resource cards show live host OS observations. See [onboarding](docs/screenshots/onboarding.png), [storage map](docs/screenshots/storage-map.png), [cleanup review](docs/screenshots/cleanup.png), the [scan dialog](docs/screenshots/scan-dialog.png) in the light appearance, the [system monitor](docs/screenshots/system.png) and the [terminal interface](docs/screenshots/terminal.png).
 
-The desktop is a native application with a module sidebar, bundled Inter and JetBrains Mono typography, Phosphor icons, and dark or light appearances that follow the system. Capacity rings, category bars, the treemap and the history chart animate into place; findings link to their evidence; the scan dialog offers quick-pick locations; and a floating activity card exposes pause, resume and cancel during long work. The terminal interface (`stratum-tui`) covers the same nine pages with keyboard navigation, live scan progress, duplicate verification and the full plan-and-approve cleanup flow. Nothing is preselected on either surface, quarantine stays reversible, and no scan starts without an explicit request. See the [product research and UX direction](docs/product-research.md) for the rationale and commercial-readiness gates.
+The desktop is a native application with a module sidebar, bundled Inter and JetBrains Mono typography, Phosphor icons, and dark or light appearances that follow the system. Capacity rings, category bars, the treemap and the history chart animate into place; findings link to their evidence; the scan dialog offers quick-pick locations; and a floating activity card exposes pause, resume and cancel during long work. The terminal interface (`stratum-tui`) covers the same nine pages with keyboard navigation, live scan progress, duplicate verification and the full plan-and-approve cleanup flow. Nothing is preselected on either surface, quarantine stays reversible until you purge it with its own typed phrase, and no scan starts without an explicit request. See the [product research and UX direction](docs/product-research.md) for the rationale and commercial-readiness gates.
 
 ## Run
 
@@ -48,11 +48,13 @@ stratum cleanup plan --path /absolute/project/target/debug/example --json
 stratum cleanup show PLAN_ID --json
 stratum cleanup execute PLAN_ID --approve 'QUARANTINE PLAN_ID' --json
 stratum cleanup undo OPERATION_ID --json
+stratum cleanup operations --json
+stratum cleanup purge OPERATION_ID --approve 'PURGE OPERATION_ID' --json
 ```
 
-Cleanup supports explicit, indexed, regular Cargo artifact and recognized package-cache files. It rejects changed files, hard links, symlinks, protected locations, directories, cross-device moves and expired plans. There is no arbitrary delete endpoint. Application uninstall proposals and duplicate groups are review-only in 0.1.
+Cleanup supports explicit, indexed, regular Cargo artifact and recognized package-cache files. It rejects changed files, hard links, symlinks, protected locations, directories, cross-device moves and expired plans. There is no arbitrary delete endpoint: permanent deletion only ever applies to files a quarantine has already moved. Application uninstall proposals and duplicate groups are review-only in 0.1.
 
-**Quarantine preserves bytes on the same filesystem; it does not free disk capacity.** No automatic permanent deletion or expiry purge is implemented. Quarantined files can be restored if their original location is available and their integrity remains valid. Stop active builds before acting on build artifacts.
+**Quarantine preserves bytes on the same filesystem; it does not free disk capacity.** Quarantined files can be restored if their original location is available and their integrity remains valid. To reclaim the space, purge the operation: `PURGE <operation-id>` is a second phrase, separate from the quarantine approval, and the purge deletes only files that still match the content hash and identity recorded when they moved. Anything that changed stays in quarantine. **A purge cannot be undone.** The desktop offers it as *Delete permanently…* on an operation's outcome, the terminal interface as `D`. Set `purge_after_hours` in the configuration to require a minimum time in quarantine; the default, 0, allows a purge as soon as the quarantine finishes. Nothing is ever purged automatically. On APFS, space held by local snapshots returns only when those snapshots expire. Plans review at most 1,000 files, so *Select largest 1,000* (`A` in the terminal) picks the biggest candidates in an opened folder. Stop active builds before acting on build artifacts.
 
 ## Local API and daemon
 

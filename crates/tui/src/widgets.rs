@@ -330,10 +330,10 @@ pub fn kind_glyph(kind: &EntryKind) -> &'static str {
 }
 pub fn status_glyph(status: &str) -> &'static str {
     match status {
-        "completed" | "moved" | "restored" | "probably_fresh" => "✓",
+        "completed" | "moved" | "restored" | "probably_fresh" | "purged" => "✓",
         "failed" | "error" => "✗",
-        "partial" | "stale" | "skipped" => "⚠",
-        "running" | "pending" => "…",
+        "partial" | "stale" | "skipped" | "restore_partial" | "purge_partial" => "⚠",
+        "running" | "pending" | "purging" => "…",
         _ => "·",
     }
 }

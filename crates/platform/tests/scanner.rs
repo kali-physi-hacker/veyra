@@ -232,3 +232,36 @@ fn deep_nesting_is_reported_and_skipped() {
     assert_eq!(depth_warnings, 1);
     assert!(deepest < 256);
 }
+#[cfg(unix)]
+#[test]
+fn verified_removal_deletes_only_the_object_it_was_shown() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let file = root.join("held");
+    fs::write(&file, "quarantined bytes").unwrap();
+    let (_, shown) = secure_fs::hash_file(&file, false, || false).unwrap();
+    // Replaced by another object under the same name: refused, and the newcomer stays. The
+    // sizes differ because a filesystem may hand the new file the old inode number and mtime.
+    fs::remove_file(&file).unwrap();
+    fs::write(&file, "another file").unwrap();
+    assert_eq!(
+        secure_fs::remove_regular(&file, &shown).unwrap_err().code,
+        "filesystem_changed"
+    );
+    assert!(file.is_file());
+    // A symlink in the leaf is never followed.
+    let (_, current) = secure_fs::hash_file(&file, false, || false).unwrap();
+    std::os::unix::fs::symlink(&file, root.join("alias")).unwrap();
+    assert!(secure_fs::remove_regular(&root.join("alias"), &current).is_err());
+    assert!(file.is_file());
+    // A second hard link means the bytes live on elsewhere: refused.
+    fs::hard_link(&file, root.join("twin")).unwrap();
+    assert!(secure_fs::remove_regular(&file, &current).is_err());
+    fs::remove_file(root.join("twin")).unwrap();
+    secure_fs::remove_regular(&file, &current).unwrap();
+    assert!(!file.exists());
+    assert!(
+        root.join("alias").symlink_metadata().is_ok(),
+        "only the named file goes"
+    );
+}

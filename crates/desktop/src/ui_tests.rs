@@ -315,10 +315,16 @@ fn cleanup_opens_on_the_recognised_folders_and_a_click_lists_their_files() {
     let mut app = App::new(&ctx, engine.clone(), Page::Cleanup);
     settle(&mut app);
     assert_eq!(app.locations.len(), 1, "{:?}", app.locations);
-    assert!(app.candidates.is_empty(), "nothing is listed or selected before a folder is opened");
+    assert!(
+        app.candidates.is_empty(),
+        "nothing is listed or selected before a folder is opened"
+    );
     frame(&mut app, &ctx, vec![], 1280.0);
     let text = frame(&mut app, &ctx, vec![], 1280.0);
-    assert!(text.iter().any(|(t, _)| t.contains("Cargo build output")), "{text:?}");
+    assert!(
+        text.iter().any(|(t, _)| t.contains("Cargo build output")),
+        "{text:?}"
+    );
     let position = text
         .iter()
         .find(|(t, _)| t.ends_with("target"))
@@ -326,11 +332,118 @@ fn cleanup_opens_on_the_recognised_folders_and_a_click_lists_their_files() {
         .1;
     click(&mut app, &ctx, position);
     settle(&mut app);
-    assert!(app.cleanup_scope.as_deref().is_some_and(|s| s.ends_with("project/target")), "{:?}", app.cleanup_scope);
     assert!(
-        app.candidates.iter().any(|c| c.path.ends_with("target/debug/artifact")),
+        app.cleanup_scope
+            .as_deref()
+            .is_some_and(|s| s.ends_with("project/target")),
+        "{:?}",
+        app.cleanup_scope
+    );
+    assert!(
+        app.candidates
+            .iter()
+            .any(|c| c.path.ends_with("target/debug/artifact")),
         "{:?}",
         app.candidates
     );
     assert!(app.selected.is_empty(), "nothing may be preselected");
+}
+
+#[test]
+fn largest_selection_then_a_separate_phrase_deletes_quarantined_files() {
+    let (temp, engine) = fixture_engine();
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+    for i in 0..3 {
+        std::fs::write(
+            root.join(format!("target/debug/artifact-{i}")),
+            vec![i as u8; 4096],
+        )
+        .unwrap();
+    }
+    engine.scan_location(root.to_str().unwrap()).unwrap();
+    let target = std::fs::canonicalize(root.join("target")).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(&ctx, engine.clone(), Page::Cleanup);
+    settle(&mut app);
+    app.cleanup_scope = Some(target.display().to_string());
+    app.refresh();
+    settle(&mut app);
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let position = text
+        .iter()
+        .find(|(t, _)| t == "Select largest 1,000")
+        .expect("an opened folder offers the largest-files selection")
+        .1;
+    click(&mut app, &ctx, position);
+    settle(&mut app);
+    assert_eq!(app.selected.len(), 3, "{:?}", app.error);
+    let plan = engine
+        .create_cleanup_plan(PlanRequest {
+            paths: app.selected.keys().cloned().collect(),
+        })
+        .unwrap();
+    let operation = engine
+        .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
+        .unwrap();
+    app.operation = Some(operation.clone());
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let position = text
+        .iter()
+        .find(|(t, _)| t == "Delete permanently…")
+        .expect("a quarantine offers permanent deletion")
+        .1;
+    click(&mut app, &ctx, position);
+    assert!(app.purge_open);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let phrase = purge_phrase(&operation.id);
+    assert!(
+        text.iter().any(|(t, _)| t == &phrase),
+        "the phrase must be shown"
+    );
+    let position = text
+        .iter()
+        .find(|(t, _)| t == "Delete permanently")
+        .expect("the confirmation has its own button")
+        .1;
+    click(&mut app, &ctx, position);
+    assert!(!app.busy, "nothing runs without the phrase");
+    app.purge_typed = format!("QUARANTINE {}", plan.id);
+    click(&mut app, &ctx, position);
+    assert!(
+        !app.busy,
+        "the quarantine phrase does not authorize a purge"
+    );
+    assert!(
+        operation
+            .items
+            .iter()
+            .all(|i| std::path::Path::new(&i.destination).is_file())
+    );
+    app.purge_typed = phrase;
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let position = text
+        .iter()
+        .find(|(t, _)| t == "Delete permanently")
+        .unwrap()
+        .1;
+    click(&mut app, &ctx, position);
+    settle(&mut app);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let purged = app.operation.as_ref().unwrap();
+    assert_eq!(purged.status, "purged");
+    for item in &operation.items {
+        assert!(!std::path::Path::new(&item.destination).exists());
+        assert!(!std::path::Path::new(&item.source).exists());
+    }
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    assert!(
+        text.iter().any(|(t, _)| t.contains("deleted permanently")),
+        "the outcome reports what was deleted"
+    );
+    assert!(!text.iter().any(|(t, _)| t == "Delete permanently…"));
 }

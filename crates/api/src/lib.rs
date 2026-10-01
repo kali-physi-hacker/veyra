@@ -150,6 +150,7 @@ pub fn router(engine: Arc<Engine>, token: String) -> Router {
         .route("/api/v1/cleanup/plans/{id}/execute", post(execute))
         .route("/api/v1/cleanup/operations/{id}", get(operation))
         .route("/api/v1/cleanup/operations/{id}/undo", post(undo))
+        .route("/api/v1/cleanup/operations/{id}/purge", post(purge))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/system/history", get(system_history))
         .route("/api/v1/events", get(events))
@@ -345,6 +346,18 @@ async fn operation(
 async fn undo(State(s): State<ApiState>, Path(id): Path<String>) -> ApiResult<CleanupOperation> {
     blocking(move || s.engine.undo_cleanup(&id)).await
 }
+/// Permanently delete what an operation still holds in quarantine.
+///
+/// The approval must be `PURGE <operation-id>`, separate from the quarantine phrase. Files that
+/// changed since they moved are left in place. A purge cannot be undone.
+#[utoipa::path(post,path="/api/v1/cleanup/operations/{id}/purge",params(("id"=String,Path)),request_body=ExecuteRequest,responses((status=200,body=CleanupOperation)))]
+async fn purge(
+    State(s): State<ApiState>,
+    Path(id): Path<String>,
+    Json(r): Json<ExecuteRequest>,
+) -> ApiResult<CleanupOperation> {
+    blocking(move || s.engine.purge_quarantine(&id, &r.approval)).await
+}
 #[utoipa::path(get,path="/api/v1/audit",params(("limit"=Option<u32>,Query),("offset"=Option<u64>,Query)),responses((status=200,body=Vec<AuditRecord>)))]
 async fn audit(
     State(s): State<ApiState>,
@@ -407,6 +420,7 @@ async fn events(
         execute,
         operation,
         undo,
+        purge,
         audit,
         system_history,
         events

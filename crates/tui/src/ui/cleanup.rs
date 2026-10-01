@@ -33,9 +33,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         if index > 0 {
             spans.push(Span::styled("  ▸  ", theme.faint()));
         }
+        let current =
+            step == phase || (step == CleanupPhase::Outcome && phase == CleanupPhase::Purge);
         spans.push(Span::styled(
             label,
-            if step == phase {
+            if current {
                 theme.bold(theme.amber)
             } else {
                 theme.muted()
@@ -47,11 +49,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled("⚠ ", theme.color(theme.amber)),
             Span::styled(
-                "Quarantine is reversible storage, not recovered capacity.",
+                "Quarantine is reversible and frees no space on its own.",
                 theme.bold(theme.amber),
             ),
             Span::styled(
-                " Files move to Stratum's private storage on the same filesystem. Stop active builds first.",
+                " Deleting quarantined files permanently is a separate, typed step. Stop active builds first.",
                 theme.muted(),
             ),
         ]))
@@ -62,6 +64,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         CleanupPhase::Select => render_selection(frame, app, body),
         CleanupPhase::Review => render_plan(frame, app, body),
         CleanupPhase::Outcome => render_outcome(frame, app, body),
+        CleanupPhase::Purge => render_purge(frame, app, body),
     }
 }
 /// Before a folder is opened: every folder the cleanup rules recognise, largest first, straight
@@ -79,7 +82,10 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(
         Line::from(vec![
             Span::styled(format!("{} folders", app.locations.len()), theme.strong()),
-            Span::styled(format!(" · {} in the index", widgets::bytes(total)), theme.muted()),
+            Span::styled(
+                format!(" · {} in the index", widgets::bytes(total)),
+                theme.muted(),
+            ),
             Span::styled(
                 format!("   {} selected", app.selected.len()),
                 if app.selected.is_empty() {
@@ -88,7 +94,10 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
                     theme.bold(theme.teal)
                 },
             ),
-            Span::styled(format!(" · {}", widgets::bytes(selected_bytes)), theme.faint()),
+            Span::styled(
+                format!(" · {}", widgets::bytes(selected_bytes)),
+                theme.faint(),
+            ),
         ]),
         bar,
     );
@@ -119,19 +128,33 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
                     theme.teal
                 };
                 let mut spans = vec![
-                    Span::styled(widgets::fit(folder_kind(location), kind_width), theme.color(color)),
+                    Span::styled(
+                        widgets::fit(folder_kind(location), kind_width),
+                        theme.color(color),
+                    ),
                     Span::raw(" "),
                     Span::styled(
                         widgets::fit(
-                            &widgets::truncate_middle(&widgets::short_path(&location.path), path_width),
+                            &widgets::truncate_middle(
+                                &widgets::short_path(&location.path),
+                                path_width,
+                            ),
                             path_width,
                         ),
                         theme.text(),
                     ),
-                    Span::styled(widgets::pad_left(&widgets::bytes(location.logical_bytes), 11), theme.strong()),
+                    Span::styled(
+                        widgets::pad_left(&widgets::bytes(location.logical_bytes), 11),
+                        theme.strong(),
+                    ),
                     Span::raw(" "),
                 ];
-                spans.extend(widgets::bar(&theme, location.logical_bytes as f64 / largest as f64, cells, color));
+                spans.extend(widgets::bar(
+                    &theme,
+                    location.logical_bytes as f64 / largest as f64,
+                    cells,
+                    color,
+                ));
                 ListItem::new(Line::from(spans))
             })
             .collect();
@@ -438,7 +461,8 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
         if failed { theme.rose } else { theme.teal },
     );
     let width = block.inner(area).width as usize;
-    let restorable = operation.items.iter().any(|i| i.status != "restored");
+    let restorable = operation.restorable();
+    let held = operation.purgeable().count();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(operation.id.clone(), theme.muted()),
@@ -461,19 +485,23 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
         let (glyph, color) = match item.status.as_str() {
             "restored" => ("↺", theme.teal),
             "moved" | "quarantined" => ("✓", theme.green),
+            "purged" => ("∅", theme.muted),
+            "missing" => ("?", theme.amber),
+            "purging" | "moving" => ("…", theme.amber),
             s if s.contains("fail") || item.error.is_some() => ("✗", theme.rose),
             _ => ("·", theme.muted),
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{glyph} "), theme.bold(color)),
+            // Wide enough for "restore failed", with a space before the path.
             Span::styled(
-                format!("{:<11}", widgets::humanize(&item.status)),
+                format!("{:<15}", widgets::humanize(&item.status)),
                 theme.text(),
             ),
             Span::styled(
                 widgets::truncate_middle(
                     &widgets::short_path(&item.source),
-                    width.saturating_sub(14),
+                    width.saturating_sub(18),
                 ),
                 theme.muted(),
             ),
@@ -488,19 +516,152 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
     lines.push(Line::raw(""));
+    let purged = operation.purged_bytes();
     lines.push(Line::styled(
-        if restorable {
-            "Quarantined bytes remain on the same filesystem and can be restored while their original location is available."
+        if held > 0 {
+            format!(
+                "{held} file{} · {} held in quarantine on the same filesystem. They can be restored while their original location is free, or deleted permanently.",
+                if held == 1 { "" } else { "s" },
+                widgets::bytes(operation.purgeable_bytes())
+            )
+        } else if purged > 0 {
+            format!(
+                "{} deleted permanently; nothing from this operation is left in quarantine.",
+                widgets::bytes(purged)
+            )
+        } else if restorable {
+            "Some files need review before they can be restored.".to_string()
         } else {
-            "Every file in this operation has been restored to its original location."
+            "Every file in this operation has been restored to its original location.".to_string()
         },
         theme.faint(),
     ));
-    let mut actions = vec![("Esc", "back to candidates"), ("o", "previous operations")];
+    let mut actions = vec![("Esc", "back"), ("o", "operations")];
+    if held > 0 {
+        actions.insert(0, ("D", "delete permanently"));
+    }
     if restorable {
         actions.insert(0, ("u", "restore quarantined files"));
     }
     lines.push(widgets::hints(&theme, &actions));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
+}
+/// The separate, typed authorization for deleting what an operation holds in quarantine. The
+/// phrase and its input come before the file list, so a short terminal cuts the list instead.
+fn render_purge(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = app.theme;
+    let Some(operation) = &app.operation else {
+        return;
+    };
+    let held: Vec<&QuarantineItem> = operation.purgeable().collect();
+    let block = card_accent(
+        &theme,
+        "Delete permanently · this cannot be undone",
+        theme.rose,
+    );
+    let inner = block.inner(area);
+    let width = (inner.width as usize).max(1);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(widgets::bytes(operation.purgeable_bytes()), theme.strong()),
+            Span::styled(
+                format!(
+                    " in {} quarantined file{}",
+                    held.len(),
+                    if held.len() == 1 { "" } else { "s" }
+                ),
+                theme.muted(),
+            ),
+        ]),
+        Line::styled(
+            "The files skip the Trash and Stratum cannot restore them. Each is checked against the content hash recorded when it moved; anything that changed stays in quarantine.",
+            theme.text(),
+        ),
+        Line::raw(""),
+    ];
+    let wait = app.purge_wait();
+    if wait > 0 {
+        lines.push(Line::styled(
+            format!(
+                "Files stay in quarantine for {} h before they can be deleted; this operation is ready in {} min.",
+                app.engine.config.purge_after_hours,
+                (wait + 59) / 60
+            ),
+            theme.color(theme.amber),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Authorization is separate from the quarantine. Type the phrase exactly, then press Enter:",
+            theme.text(),
+        ));
+        lines.push(Line::styled(
+            purge_phrase(&operation.id),
+            theme.bold(theme.rose),
+        ));
+        let matches = app.purge_matches();
+        lines.push(Line::from(vec![
+            Span::styled("▏", theme.faint()),
+            Span::styled(app.purge_typed.clone(), theme.text()),
+            Span::styled("█", theme.color(widgets::pulse(&theme, app.tick))),
+            Span::styled(
+                if matches {
+                    "  ✓ matches · Enter deletes permanently"
+                } else if app.purge_typed.is_empty() {
+                    "  waiting for the exact phrase"
+                } else {
+                    "  ✗ does not match yet"
+                },
+                if matches {
+                    theme.color(theme.rose)
+                } else {
+                    theme.muted()
+                },
+            ),
+        ]));
+    }
+    lines.push(widgets::hints(
+        &theme,
+        &[
+            ("Enter", "delete permanently"),
+            ("Esc", "keep in quarantine"),
+            ("^U", "clear input"),
+        ],
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Files to delete", theme.eyebrow()));
+    // Whatever height the wrapped lines above leave, less one line for "… and N more".
+    let used: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+    let room = (inner.height as usize).saturating_sub(used + 1);
+    let shown = if held.len() > room { room } else { held.len() };
+    for item in held.iter().take(shown) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                widgets::pad_left(&widgets::bytes(item.identity.size), 11),
+                theme.text(),
+            ),
+            Span::styled(
+                format!(
+                    "  {}",
+                    widgets::truncate_middle(
+                        &widgets::short_path(&item.source),
+                        width.saturating_sub(14)
+                    )
+                ),
+                theme.muted(),
+            ),
+        ]));
+    }
+    if held.len() > shown {
+        lines.push(Line::styled(
+            format!("… and {} more", held.len() - shown),
+            theme.faint(),
+        ));
+    }
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })

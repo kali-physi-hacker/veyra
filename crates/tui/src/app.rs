@@ -162,6 +162,8 @@ pub enum CleanupPhase {
     Select,
     Review,
     Outcome,
+    /// The outcome with its permanent-deletion confirmation open.
+    Purge,
 }
 /// One row of the grouped cleanup list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,6 +270,8 @@ pub enum Payload {
     Locations(Vec<CleanupLocation>, Vec<CleanupOperation>),
     Plan(Box<CleanupPlan>),
     Operation(Box<CleanupOperation>),
+    /// The largest candidates in the open folder, to become the whole selection.
+    Selection(Vec<CleanupCandidate>),
     Audit(Vec<AuditRecord>),
     Scanned(Vec<ScanRecord>),
 }
@@ -348,6 +352,9 @@ pub struct App {
     pub operations: Vec<CleanupOperation>,
     pub operations_nav: Nav,
     pub approval: String,
+    /// Whether the permanent-deletion confirmation is open, and the phrase typed into it.
+    pub purge_open: bool,
+    pub purge_typed: String,
     // Audit
     pub audit: Vec<AuditRecord>,
     pub audit_offset: u64,
@@ -429,6 +436,8 @@ impl App {
             operations: Vec::new(),
             operations_nav: Nav::default(),
             approval: String::new(),
+            purge_open: false,
+            purge_typed: String::new(),
             audit: Vec::new(),
             audit_offset: 0,
             audit_nav: Nav::default(),
@@ -457,12 +466,27 @@ impl App {
     }
     pub fn cleanup_phase(&self) -> CleanupPhase {
         if self.operation.is_some() {
-            CleanupPhase::Outcome
+            if self.purge_open {
+                CleanupPhase::Purge
+            } else {
+                CleanupPhase::Outcome
+            }
         } else if self.plan.is_some() {
             CleanupPhase::Review
         } else {
             CleanupPhase::Select
         }
+    }
+    pub fn purge_matches(&self) -> bool {
+        self.operation
+            .as_ref()
+            .is_some_and(|o| purge_phrase(&o.id) == self.purge_typed)
+    }
+    /// Seconds until the open operation's files may be purged; 0 when they may be now.
+    pub fn purge_wait(&self) -> i64 {
+        self.operation.as_ref().map_or(0, |o| {
+            self.engine.purge_ready_at(o).saturating_sub(now()).max(0)
+        })
     }
     pub fn approval_matches(&self) -> bool {
         self.plan
@@ -811,16 +835,32 @@ impl App {
                 );
             }
             Payload::Operation(operation) => {
-                self.status = format!(
-                    "Operation {} · inspect the per-file outcome",
-                    operation.status
-                );
-                self.toast(
+                let purge = operation.status.starts_with("purge");
+                self.status = if purge {
                     format!(
-                        "Operation {} · {} files",
-                        widgets::humanize(&operation.status),
-                        operation.items.len()
-                    ),
+                        "Deleted {} permanently · inspect the per-file outcome",
+                        widgets::bytes(operation.purged_bytes())
+                    )
+                } else {
+                    format!(
+                        "Operation {} · inspect the per-file outcome",
+                        operation.status
+                    )
+                };
+                self.toast(
+                    if purge {
+                        format!(
+                            "{} deleted permanently · {}",
+                            widgets::bytes(operation.purged_bytes()),
+                            widgets::humanize(&operation.status)
+                        )
+                    } else {
+                        format!(
+                            "Operation {} · {} files",
+                            widgets::humanize(&operation.status),
+                            operation.items.len()
+                        )
+                    },
                     if operation.status.contains("fail") {
                         ToastKind::Warning
                     } else {
@@ -830,8 +870,24 @@ impl App {
                 self.operation = Some(*operation);
                 self.plan = None;
                 self.approval.clear();
+                self.purge_open = false;
+                self.purge_typed.clear();
                 self.selected.clear();
                 self.refresh();
+            }
+            Payload::Selection(candidates) => {
+                self.selected = candidates
+                    .into_iter()
+                    .take(MAX_SELECTION)
+                    .map(|c| (c.path, c.size))
+                    .collect();
+                self.toast(
+                    format!(
+                        "Selected the {} largest candidates here · nothing has moved",
+                        self.selected.len()
+                    ),
+                    ToastKind::Info,
+                );
             }
             Payload::Audit(records) => {
                 self.audit = records;
@@ -1045,6 +1101,13 @@ impl App {
                 ("Esc", "back to selection"),
             ];
         }
+        if self.page == Page::Cleanup && self.cleanup_phase() == CleanupPhase::Purge {
+            return vec![
+                ("type", "purge phrase"),
+                ("Enter", "delete permanently"),
+                ("Esc", "keep in quarantine"),
+            ];
+        }
         let mut hints = match self.page {
             Page::Overview => vec![("↑↓", "findings"), ("Enter", "investigate")],
             Page::Storage => vec![
@@ -1085,12 +1148,24 @@ impl App {
                 CleanupPhase::Select => vec![
                     ("x", "toggle"),
                     ("a", "all on page"),
+                    ("A", "largest 1,000"),
                     ("p", "plan"),
                     ("0", "all folders"),
                     ("] [", "page"),
                 ],
-                CleanupPhase::Review => vec![],
-                CleanupPhase::Outcome => vec![("u", "restore"), ("Esc", "back")],
+                CleanupPhase::Review | CleanupPhase::Purge => vec![],
+                CleanupPhase::Outcome => {
+                    let operation = self.operation.as_ref();
+                    let mut keys = vec![];
+                    if operation.is_some_and(CleanupOperation::restorable) {
+                        keys.push(("u", "restore"));
+                    }
+                    if operation.is_some_and(|o| o.purgeable().next().is_some()) {
+                        keys.push(("D", "delete permanently"));
+                    }
+                    keys.push(("Esc", "back"));
+                    keys
+                }
             },
             Page::Audit => vec![("↑↓", "move"), ("] [", "page")],
         };
@@ -1135,6 +1210,9 @@ impl App {
         }
         if self.page == Page::Cleanup && self.cleanup_phase() == CleanupPhase::Review {
             return self.approval_key(key);
+        }
+        if self.page == Page::Cleanup && self.cleanup_phase() == CleanupPhase::Purge {
+            return self.purge_key(key);
         }
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
@@ -1465,9 +1543,24 @@ impl App {
     fn cleanup_key(&mut self, key: KeyEvent, page_len: usize) {
         if self.cleanup_phase() == CleanupPhase::Outcome {
             match key.code {
+                KeyCode::Char('D') => {
+                    if self
+                        .operation
+                        .as_ref()
+                        .is_some_and(|o| o.purgeable().next().is_some())
+                    {
+                        self.purge_open = true;
+                        self.purge_typed.clear();
+                    } else {
+                        self.toast(
+                            "Nothing from this operation is still in quarantine",
+                            ToastKind::Info,
+                        );
+                    }
+                }
                 KeyCode::Char('u') => {
                     if let Some(operation) = self.operation.clone()
-                        && operation.items.iter().any(|i| i.status != "restored")
+                        && operation.restorable()
                     {
                         self.task(move |engine| {
                             Ok(Payload::Operation(Box::new(
@@ -1560,6 +1653,21 @@ impl App {
                 }
             }
             KeyCode::Char('n') => self.selected.clear(),
+            KeyCode::Char('A') => {
+                if let Some(scope) = self.cleanup_scope.clone() {
+                    self.task(move |engine| {
+                        Ok(Payload::Selection(
+                            engine
+                                .cleanup_candidates(&FileQuery {
+                                    path: Some(scope),
+                                    limit: MAX_SELECTION as u32,
+                                    ..Default::default()
+                                })?
+                                .items,
+                        ))
+                    });
+                }
+            }
             KeyCode::Char('p') => {
                 if self.selected.is_empty() {
                     self.toast("Select at least one exact file first", ToastKind::Warning);
@@ -1576,7 +1684,9 @@ impl App {
                 self.operations_nav.ensure(self.operations.len());
                 self.overlay = Overlay::Operations;
             }
-            KeyCode::Char('0') | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') if self.cleanup_scope.is_some() => {
+            KeyCode::Char('0') | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h')
+                if self.cleanup_scope.is_some() =>
+            {
                 self.cleanup_scope = None;
                 self.cleanup_offset = 0;
                 self.refresh();
@@ -1629,6 +1739,52 @@ impl App {
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.approval.len() < 200 {
                     self.approval.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn purge_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.purge_open = false;
+                self.purge_typed.clear();
+                self.toast("Kept in quarantine · nothing was deleted", ToastKind::Info);
+            }
+            KeyCode::Enter => {
+                let Some(operation) = self.operation.clone() else {
+                    return;
+                };
+                let wait = self.purge_wait();
+                if wait > 0 {
+                    self.toast(
+                        format!(
+                            "Files stay in quarantine for {} h; this operation is ready in {} min",
+                            self.engine.config.purge_after_hours,
+                            (wait + 59) / 60
+                        ),
+                        ToastKind::Warning,
+                    );
+                } else if self.purge_matches() {
+                    let approval = self.purge_typed.clone();
+                    self.task(move |engine| {
+                        Ok(Payload::Operation(Box::new(
+                            engine.purge_quarantine(&operation.id, &approval)?,
+                        )))
+                    });
+                } else {
+                    self.toast("The purge phrase must match exactly", ToastKind::Warning);
+                }
+            }
+            KeyCode::Backspace => {
+                self.purge_typed.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.purge_typed.clear();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.purge_typed.len() < 200 {
+                    self.purge_typed.push(c);
                 }
             }
             _ => {}
@@ -1780,7 +1936,12 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.locations_nav.first(len),
             KeyCode::Char('G') | KeyCode::End => self.locations_nav.last(len),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                if let Some(path) = self.locations_nav.index(len).and_then(|i| self.locations.get(i)).map(|l| l.path.clone()) {
+                if let Some(path) = self
+                    .locations_nav
+                    .index(len)
+                    .and_then(|i| self.locations.get(i))
+                    .map(|l| l.path.clone())
+                {
                     // The selection carries across folders, so one plan can cover several.
                     self.cleanup_scope = Some(path);
                     self.cleanup_offset = 0;
@@ -1791,7 +1952,10 @@ impl App {
             KeyCode::Char('n') => self.selected.clear(),
             KeyCode::Char('p') => {
                 if self.selected.is_empty() {
-                    self.toast("Open a folder and select exact files first", ToastKind::Warning);
+                    self.toast(
+                        "Open a folder and select exact files first",
+                        ToastKind::Warning,
+                    );
                 } else {
                     let paths = self.selected.keys().cloned().collect();
                     self.task(move |engine| {

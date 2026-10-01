@@ -89,6 +89,9 @@ fn openapi_has_security_typed_actions_and_query_filters() {
     assert!(spec["components"]["schemas"]["InsightMeasurements"].is_object());
     assert!(spec["paths"]["/api/v1/cleanup/plans/{id}/execute"]["post"]["requestBody"].is_object());
     assert!(
+        spec["paths"]["/api/v1/cleanup/operations/{id}/purge"]["post"]["requestBody"].is_object()
+    );
+    assert!(
         spec["paths"]["/api/v1/files"]["get"]["parameters"]
             .as_array()
             .unwrap()
