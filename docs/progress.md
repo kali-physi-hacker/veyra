@@ -152,3 +152,26 @@ Steps along the way, first scan: columns, reader pool and bulk mode 94.08 s; par
 - Sorting by allocated bytes and filtering by category now sort or filter through the size index; both are rare and slower on large indexes.
 - Live results cover a root's first scan; a rescan stays behind the saved index until it publishes. The API and CLI keep the published view unless a client opts in.
 - Migration 5 drops the entries of earlier releases rather than converting them: an in-place conversion of a multi-gigabyte index needs more free space than the index itself and hours of rewriting. Scan records, history, plans, operations and audit records survive; each location must be rescanned once, and the store vacuums the file so the space returns to the disk.
+
+## The write-ahead log after a scan — 2026-10-01
+
+### Found
+
+The Home scan of 27 September left a 13.1 GB `index.sqlite3-wal` beside a 5.4 GB index. Bulk mode ended with a passive checkpoint, which copies frames into the database but never shrinks the file, and the pages reading the running scan kept SQLite from restarting the log. That checkpoint had also stopped short: 1.8 GB of the scan existed only in the WAL until it was folded in on 1 October, so deleting the file would have lost it.
+
+### Implemented
+
+- Every write connection sets `journal_size_limit` to 64 MiB.
+- `insert_batch` checkpoints and truncates the WAL between batches once it passes 512 MiB, waiting up to 100 ms for readers, or two seconds past 2 GiB.
+- Publication starts from an empty WAL, and the end of bulk mode truncates it with up to three two-second waits for readers, falling back to a passive checkpoint and a warning.
+- `Store::open` truncates any WAL left behind; `Store::wal_bytes` reports its size. Two index tests cover a finished scan and a WAL left by another connection.
+
+### Measurements
+
+`~/development/personal`, 546,891 entries, scanned with a reader querying the table every 0.2 s throughout: 16 s (streaming 10.0 s, publication 5.4 s); the WAL peaked at 739 MiB during publication against a 738 MiB index, and no WAL remained afterwards. The Home index: 13.1 GB of WAL folded in and truncated; its files went from 18.5 GB to 7.6 GB with no free pages, and 29 GiB of the disk is free again.
+
+### Limits
+
+- Publication is one transaction, so the WAL briefly reaches about the size of the generation it publishes: roughly 6 GB for a 5.5-million-entry home folder. A disk with less free space than that fails the publication, which rolls back and leaves the previous generation in place.
+- A truncation waits for readers; a page holding a long read can defer it to the next batch or the next open.
+

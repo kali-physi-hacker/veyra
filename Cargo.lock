@@ -3656,6 +3656,7 @@ dependencies = [
  "serde_json",
  "stratum-domain",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

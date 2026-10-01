@@ -36,9 +36,11 @@ The benchmark also reports category-query and intelligence-rule latency.
 
 ## Scanning
 
-`scan_threads` (0 chooses from the core count, capped at eight; up to 64) sets the directory-listing workers; `batch_size` (4,000) caps a write batch, and a batch also flushes after 250 ms so progress reaches pages steadily. `cargo run --release -p stratum-platform --example walk -- DIR` times the traversal alone and prints entry, directory and provisional counts; `STRATUM_SCAN_THREADS=n` overrides the workers for that run.
+`scan_threads` (0 chooses from the core count, capped at eight; up to 64) sets the directory-listing workers; `batch_size` (20,000) caps a write batch, and a batch also flushes after a second so progress reaches pages steadily. `cargo run --release -p stratum-platform --example walk -- DIR` times the traversal alone and prints entry, directory and provisional counts; `STRATUM_SCAN_THREADS=n` overrides the workers for that run.
 
 Readers never wait for the writer: `Store` keeps a pool of read connections beside the single writer. The desktop and terminal call `Engine::set_live_view(true)`, so a root's first scan is readable while it runs and their pages refresh as batches land; a rescan keeps the published generation visible until it publishes. The API and CLI keep the published view. `Engine::cached` memoises derived views against `Store::version`, which every write bumps.
+
+The write-ahead log never outlives a scan. Pages reading the running scan can keep SQLite from ever restarting the WAL, so `insert_batch` checkpoints and truncates it between batches once it passes 512 MiB, waiting briefly for readers (up to two seconds past 2 GiB). Publication starts from an empty WAL and rewrites the generation in one transaction, so the file peaks near the index's own size while it publishes, and the end of bulk mode truncates it to nothing. `journal_size_limit` cuts the file back to 64 MiB whenever SQLite restarts it, and opening the index truncates a WAL left by a crash or an older release (a process still reading it defers that). To fold a WAL in by hand, run `sqlite3 ~/.local/share/stratum/index.sqlite3 'PRAGMA wal_checkpoint(TRUNCATE)'`; never delete the file, because frames not yet checkpointed exist nowhere else.
 
 Opening a state directory written by a release before schema version 5 drops its indexed entries (not its scan records, history, plans, operations or audit log), vacuums the file and records `index_format_changed` in the audit log; scan each location again.
 

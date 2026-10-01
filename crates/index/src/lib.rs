@@ -221,13 +221,35 @@ const CARRIED_TABLES: [&str; 8] = [
 
 fn open_connection(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path).map_err(db)?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(db)?;
+    connection.busy_timeout(BUSY).map_err(db)?;
     // Larger pages suit long path keys and sequential index builds. The size only takes
-    // effect on a new database; an existing one keeps the size it was created with.
-    connection.execute_batch("PRAGMA page_size=16384; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16384; PRAGMA temp_store=FILE;").map_err(db)?;
+    // effect on a new database; an existing one keeps the size it was created with. Whenever
+    // the WAL restarts from the beginning, SQLite cuts the file back to journal_size_limit.
+    connection.execute_batch(&format!("PRAGMA page_size=16384; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; PRAGMA journal_size_limit={WAL_KEEP};")).map_err(db)?;
     Ok(connection)
+}
+/// How long a connection waits for a lock before reporting the database busy.
+const BUSY: Duration = Duration::from_secs(5);
+/// The WAL file is cut back to this size whenever SQLite restarts it.
+const WAL_KEEP: u64 = 64 << 20;
+/// While a scan streams, a WAL past this size is checkpointed and truncated between batches,
+/// waiting briefly for readers to finish.
+const WAL_SOFT_LIMIT: u64 = 512 << 20;
+/// Past this size the truncation waits longer for readers, pausing the scan for a moment rather
+/// than letting live queries keep the WAL from ever restarting.
+const WAL_HARD_LIMIT: u64 = 2 << 30;
+
+/// Copies every WAL frame into the database and truncates the WAL to nothing, waiting at most
+/// `wait` for readers to move off it. False when readers or another checkpoint held it.
+fn truncate_wal(connection: &Connection, wait: Duration) -> Result<bool> {
+    connection.busy_timeout(wait).map_err(db)?;
+    let busy: std::result::Result<i64, _> = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
+    connection.busy_timeout(BUSY).map_err(db)?;
+    match busy {
+        Ok(busy) => Ok(busy == 0),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy => Ok(false),
+        Err(e) => Err(db(e)),
+    }
 }
 fn schema_version(connection: &Connection) -> Result<u32> {
     connection
@@ -238,6 +260,9 @@ fn schema_version(connection: &Connection) -> Result<u32> {
 /// gigabytes. Freeing that table page by page takes SQLite as long as reading it, so the file
 /// is rebuilt instead: the small tables are copied into a fresh file at the same schema
 /// version, which then takes the old file's place, and the ordinary migrations follow.
+fn wal_bytes(path: &Path) -> u64 {
+    std::fs::metadata(sidecar(path, "-wal")).map(|m| m.len()).unwrap_or(0)
+}
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -314,6 +339,15 @@ impl Store {
                     .map_err(db)?;
             }
         }
+        // A WAL left large by a crash, or by a release that never truncated it, is folded back
+        // into the database now. Another process reading the index can keep it for later.
+        if wal_bytes(path) > 0 {
+            match truncate_wal(&connection, Duration::from_millis(250)) {
+                Ok(true) => tracing::debug!("truncated the write-ahead log on open"),
+                Ok(false) => tracing::debug!("write-ahead log in use elsewhere; left for later"),
+                Err(e) => tracing::warn!(error = %e.message, "could not truncate the write-ahead log"),
+            }
+        }
         Ok(Self {
             path: path.to_path_buf(),
             writer: Mutex::new(connection),
@@ -337,9 +371,7 @@ impl Store {
             Some(connection) => connection,
             None => {
                 let connection = Connection::open(&self.path).map_err(db)?;
-                connection
-                    .busy_timeout(Duration::from_secs(5))
-                    .map_err(db)?;
+                connection.busy_timeout(BUSY).map_err(db)?;
                 connection
                     .execute_batch("PRAGMA query_only=ON; PRAGMA cache_size=-16384;")
                     .map_err(db)?;
@@ -390,9 +422,26 @@ impl Store {
         conn.execute_batch(if on {
             "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-262144; PRAGMA wal_autocheckpoint=25000; PRAGMA threads=4;"
         } else {
-            "PRAGMA synchronous=FULL; PRAGMA cache_size=-16384; PRAGMA wal_autocheckpoint=1000; PRAGMA threads=0; PRAGMA wal_checkpoint(PASSIVE);"
+            "PRAGMA synchronous=FULL; PRAGMA cache_size=-16384; PRAGMA wal_autocheckpoint=1000; PRAGMA threads=0;"
         })
-        .map_err(db)
+        .map_err(db)?;
+        if !on {
+            // The scan and its publication can leave gigabytes of WAL behind. Fold them into
+            // the database and give the space back, waiting for the pages that refresh on
+            // completion to finish reading.
+            for _ in 0..3 {
+                if truncate_wal(&conn, Duration::from_secs(2))? {
+                    return Ok(());
+                }
+            }
+            tracing::warn!(wal_bytes = wal_bytes(&self.path), "write-ahead log still in use after the scan; it is truncated when next idle");
+            conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);").map_err(db)?;
+        }
+        Ok(())
+    }
+    /// The size of the write-ahead log on disk.
+    pub fn wal_bytes(&self) -> u64 {
+        wal_bytes(&self.path)
     }
     /// Scans that are running for roots without a published generation.
     fn running_first_scans(&self) -> Result<Vec<String>> {
@@ -458,6 +507,15 @@ impl Store {
             }
         }
         tx.commit().map_err(db)?;
+        // Pages that read the running scan can keep SQLite from ever restarting the WAL, so a
+        // long scan truncates it here once it grows, waiting a little longer the larger it is.
+        let wal = wal_bytes(&self.path);
+        if wal > WAL_SOFT_LIMIT {
+            let wait = if wal > WAL_HARD_LIMIT { Duration::from_secs(2) } else { Duration::from_millis(100) };
+            if !truncate_wal(&conn, wait)? {
+                tracing::debug!(wal_bytes = wal, "write-ahead log busy with readers; truncating after a later batch");
+            }
+        }
         drop(conn);
         self.bump();
         Ok(())
@@ -468,6 +526,11 @@ impl Store {
     }
     pub fn finish_scan(&self, scan: &ScanRecord, retain_days: u32) -> Result<()> {
         let mut conn = self.writer()?;
+        // Publication rewrites the whole generation in one transaction; start it from an empty
+        // WAL so the file peaks at the size of that transaction alone.
+        if wal_bytes(&self.path) > WAL_KEEP {
+            truncate_wal(&conn, Duration::from_secs(2))?;
+        }
         let tx = conn.transaction().map_err(db)?;
         tx.execute("UPDATE scans SET completed=?2,status=?3,entries=?4,warnings=?5,excluded=?6,logical=?7,allocated=?8,freshness=?9 WHERE id=?1", params![scan.id,scan.completed_at,scan.status,scan.entries as i64,scan.warnings as i64,scan.excluded as i64,scan.logical_bytes as i64,scan.allocated_bytes as i64,scan.freshness]).map_err(db)?;
         if scan.status == "completed" || scan.status == "partial" {
