@@ -265,3 +265,59 @@ fn verified_removal_deletes_only_the_object_it_was_shown() {
         "only the named file goes"
     );
 }
+#[cfg(unix)]
+#[test]
+fn trees_are_surveyed_and_removed_without_following_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep"), "outside bytes").unwrap();
+    let tree = root.join("target");
+    fs::create_dir_all(tree.join("debug/deps")).unwrap();
+    fs::write(tree.join("debug/deps/a.rlib"), vec![1u8; 4096]).unwrap();
+    fs::write(tree.join("debug/b"), "bb").unwrap();
+    symlink(&outside, tree.join("debug/to-outside")).unwrap();
+    symlink(outside.join("keep"), tree.join("file-link")).unwrap();
+    fs::create_dir(tree.join("locked")).unwrap();
+    fs::write(tree.join("locked/c"), "c").unwrap();
+    fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (identity, totals) = secure_fs::survey_tree(&tree, &[".git"]).unwrap();
+    assert_eq!(totals.directories, 3, "debug, debug/deps and locked");
+    assert_eq!(totals.files, 5, "three files and two symlinks");
+    assert!(
+        totals.logical_bytes >= 4099,
+        "three files: 4096, 2 and 1 bytes"
+    );
+    // A protected name anywhere inside refuses the whole tree.
+    fs::create_dir(tree.join("debug/.git")).unwrap();
+    assert_eq!(
+        secure_fs::survey_tree(&tree, &[".git"]).unwrap_err().code,
+        "protected_path"
+    );
+    fs::remove_dir(tree.join("debug/.git")).unwrap();
+    // A symlink to the tree is neither surveyed nor removed.
+    symlink(&tree, root.join("alias")).unwrap();
+    assert!(secure_fs::survey_tree(&root.join("alias"), &[]).is_err());
+    assert!(secure_fs::remove_tree(&root.join("alias"), &identity).is_err());
+    // Another directory's identity is refused before anything goes.
+    fs::create_dir(root.join("other")).unwrap();
+    let other = secure_fs::directory_identity(&root.join("other")).unwrap();
+    assert_eq!(
+        secure_fs::remove_tree(&tree, &other).unwrap_err().code,
+        "filesystem_changed"
+    );
+    assert!(tree.join("debug/b").exists());
+
+    let removed = secure_fs::remove_tree(&tree, &identity).unwrap();
+    assert_eq!((removed.files, removed.directories), (5, 3));
+    assert!(!tree.exists());
+    assert_eq!(
+        fs::read_to_string(outside.join("keep")).unwrap(),
+        "outside bytes",
+        "symlink targets survive"
+    );
+    assert!(root.join("alias").symlink_metadata().is_ok());
+}

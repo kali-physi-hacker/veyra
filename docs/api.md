@@ -24,9 +24,9 @@ All requests use `Authorization: Bearer <local token>`. Querying is read-only un
 | `/apps/{id}/uninstall-plan` | POST review proposal; bundle execution is unsupported |
 | `/insights`, `/insights/{id}` | GET deterministic findings with evidence |
 | `/cleanup/candidates` | GET conservative candidate discovery |
-| `/cleanup/plans` | POST explicit `paths`; creates immutable, non-destructive plan |
+| `/cleanup/plans` | POST explicit `paths`, or whole recognised `folders`; creates immutable, non-destructive plan |
 | `/cleanup/plans/{id}` | GET exact plan preview |
-| `/cleanup/plans/{id}/execute` | POST exact approval phrase; separate action capability |
+| `/cleanup/plans/{id}/execute` | POST exact approval phrase: `QUARANTINE` moves, `DELETE` moves and purges; separate action capability |
 | `/cleanup/operations/{id}` | GET durable per-file action journal |
 | `/cleanup/operations/{id}/undo` | POST no-clobber restoration |
 | `/cleanup/operations/{id}/purge` | POST exact purge phrase; permanently deletes what the operation still holds in quarantine |
@@ -65,6 +65,10 @@ Submit to `POST /cleanup/plans`. Review returned items, evidence, risk, expiry a
 
 Submit to `POST /cleanup/plans/<plan-id>/execute`. Store the returned operation ID for status and undo. A plan is claimed only once. Repeating execution returns `conflict`; it never expands the selection. A multi-file operation may end `partial`; inspect every item before retrying or undoing. Permission errors, file replacement or expiry require another plan, not a forced override.
 
+A plan for whole folders takes `{"folders":["/absolute/project/target"]}` instead, with 1–100 folders and never both kinds. Each must be a recognised folder: `target` beside a `Cargo.toml`, `.npm/_cacache` or `.cargo/registry/cache`. Its item carries `folder` with the surveyed `files`, `directories`, `logical_bytes` and `allocated_bytes`, and no content hash. A folder holding a protected name such as `.git`, another filesystem, an indexed root or Stratum's state is refused with `protected_path`.
+
+Every plan also carries `delete_phrase`, `DELETE <plan-id>`. Sent as the approval, it quarantines the plan and purges it in the same operation, which then ends `purged`, or `purge_partial` when something is left. It needs its own explicit approval for permanent deletion, and returns `conflict` without moving anything while `purge_after_hours` is set.
+
 Quarantine reclaims no space. To delete what an operation holds, permanently, obtain a second, explicit approval and send
 
 ```json
@@ -77,4 +81,4 @@ to `POST /cleanup/operations/<operation-id>/purge`. Only files still in quaranti
 
 Domain errors return `{code,message}`. Codes include `invalid_request`, `path_not_found`, `permission_denied`, `database_error`, `unsupported_platform_feature`, `scan_cancelled`, `filesystem_changed`, `protected_path`, `invalid_cleanup_plan`, `approval_required`, `busy`, `conflict`, `not_found`, `overlapping_root`. Authentication returns 401, protected/approval failures 403, missing resources 404, conflicts 409, unsupported execution 501. Messages are explanatory; code is the automation contract.
 
-Request bodies are capped at 64 KiB. Plan selection is 1–1,000 paths. Scan request roots are capped at 16 through HTTP. The API initially caps scan lists at 1,000, warning details at 10,000 per scan, application results at 1,000 matching bundles, history at 10,000 observations and system history at 1,000 samples. Underlying warning counts still report omitted details. These are documented bounded views, not completeness guarantees.
+Request bodies are capped at 64 KiB. Plan selection is 1–1,000 paths or 1–100 folders. Scan request roots are capped at 16 through HTTP. The API initially caps scan lists at 1,000, warning details at 10,000 per scan, application results at 1,000 matching bundles, history at 10,000 observations and system history at 1,000 samples. Underlying warning counts still report omitted details. These are documented bounded views, not completeness guarantees.

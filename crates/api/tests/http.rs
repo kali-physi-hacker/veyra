@@ -91,6 +91,10 @@ fn openapi_has_security_typed_actions_and_query_filters() {
     assert!(
         spec["paths"]["/api/v1/cleanup/operations/{id}/purge"]["post"]["requestBody"].is_object()
     );
+    assert!(spec["components"]["schemas"]["PlanRequest"]["properties"]["folders"].is_object());
+    assert!(
+        spec["components"]["schemas"]["CleanupPlan"]["properties"]["delete_phrase"].is_object()
+    );
     assert!(
         spec["paths"]["/api/v1/files"]["get"]["parameters"]
             .as_array()

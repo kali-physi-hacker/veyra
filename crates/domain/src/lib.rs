@@ -377,6 +377,17 @@ pub struct CleanupLocation {
     pub allocated_bytes: u64,
     pub modified_at: Option<i64>,
 }
+/// What a whole folder held when it was surveyed for a plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FolderContents {
+    /// Regular files, symlinks and anything else that is not a directory.
+    pub files: u64,
+    pub directories: u64,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+}
+/// One file, or one whole folder, of a plan. A folder carries its surveyed contents and no
+/// content hash; its identity is the directory's own.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PlanItem {
     pub path: String,
@@ -385,6 +396,8 @@ pub struct PlanItem {
     pub content_hash: String,
     pub reason: String,
     pub risk: String,
+    #[serde(default)]
+    pub folder: Option<FolderContents>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CleanupPlan {
@@ -395,11 +408,37 @@ pub struct CleanupPlan {
     pub total_bytes: u64,
     pub action: String,
     pub risk: String,
+    /// `QUARANTINE <plan-id>`: moves the plan's files or folders into quarantine.
     pub approval_phrase: String,
+    /// `DELETE <plan-id>`: quarantines, then purges at once. Irreversible.
+    #[serde(default)]
+    pub delete_phrase: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// Exact files, or whole recognised folders; a plan holds one kind or the other.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct PlanRequest {
+    #[serde(default)]
     pub paths: Vec<String>,
+    #[serde(default)]
+    pub folders: Vec<String>,
+}
+impl PlanRequest {
+    pub fn of_files(paths: Vec<String>) -> Self {
+        Self {
+            paths,
+            ..Self::default()
+        }
+    }
+    pub fn of_folders(folders: Vec<String>) -> Self {
+        Self {
+            folders,
+            ..Self::default()
+        }
+    }
+}
+/// The phrase that quarantines a plan and purges it in the same operation.
+pub fn delete_phrase(plan_id: &str) -> String {
+    format!("DELETE {plan_id}")
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ExecuteRequest {
@@ -424,8 +463,16 @@ pub struct QuarantineItem {
     pub hash: String,
     pub status: String,
     pub error: Option<String>,
+    /// Set when the item is a whole folder.
+    #[serde(default)]
+    pub folder: Option<FolderContents>,
 }
 impl QuarantineItem {
+    /// The bytes it held: a file's size, or a folder's surveyed total.
+    pub fn bytes(&self) -> u64 {
+        self.folder
+            .map_or(self.identity.size, |folder| folder.logical_bytes)
+    }
     /// Stratum still holds this file's bytes in quarantine, so a purge may delete them.
     pub fn purgeable(&self) -> bool {
         matches!(
@@ -460,14 +507,14 @@ impl CleanupOperation {
     }
     /// Bytes a purge would delete, by the sizes recorded when the files moved.
     pub fn purgeable_bytes(&self) -> u64 {
-        self.purgeable().map(|i| i.identity.size).sum()
+        self.purgeable().map(QuarantineItem::bytes).sum()
     }
     /// Bytes this operation's purges have deleted.
     pub fn purged_bytes(&self) -> u64 {
         self.items
             .iter()
             .filter(|i| i.status == "purged")
-            .map(|i| i.identity.size)
+            .map(QuarantineItem::bytes)
             .sum()
     }
     pub fn restorable(&self) -> bool {

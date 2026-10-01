@@ -511,3 +511,38 @@ fn purge_takes_its_own_phrase_and_deletes_only_quarantined_files() {
     press(&mut app, 'D');
     assert!(!app.purge_open, "nothing is left to delete");
 }
+
+#[test]
+fn a_ticked_folder_is_deleted_whole_with_the_delete_phrase() {
+    let harness = fixture();
+    let mut app = App::new(harness.engine.clone(), Theme::truecolor());
+    settle(&mut app);
+    go(&mut app, Page::Cleanup);
+    let target = app.locations[0].path.clone();
+    assert!(target.ends_with("Projects/atlas/target"));
+    press(&mut app, 'x');
+    assert!(app.selected_folders.contains_key(&target));
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("[x]"), "{text}");
+    press(&mut app, 'p');
+    settle(&mut app);
+    let plan = app.plan.clone().expect("a folder plan");
+    assert!(plan.items[0].folder.is_some());
+    let text = screen(&mut app, 80, 24);
+    assert!(text.contains(&plan.approval_phrase), "{text}");
+    assert!(text.contains(&plan.delete_phrase), "{text}");
+    for c in plan.delete_phrase.chars() {
+        press(&mut app, c);
+    }
+    assert!(app.approval_matches());
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("Enter deletes permanently"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    settle(&mut app);
+    let operation = app.operation.clone().expect("the plan should run");
+    assert_eq!(operation.status, "purged");
+    assert!(!std::path::Path::new(&target).exists());
+    assert!(harness.root.join("Projects/atlas/Cargo.toml").is_file());
+    let text = screen(&mut app, 120, 36);
+    assert!(text.contains("folder of"), "{text}");
+}

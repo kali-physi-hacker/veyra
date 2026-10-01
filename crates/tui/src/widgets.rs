@@ -337,6 +337,11 @@ pub fn status_glyph(status: &str) -> &'static str {
         _ => "·",
     }
 }
+/// "1 folder", "3 files": a count with its noun.
+pub fn count_label(n: usize, folders: bool) -> String {
+    let noun = if folders { "folder" } else { "file" };
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
 pub fn humanize(text: &str) -> String {
     text.replace('_', " ")
 }

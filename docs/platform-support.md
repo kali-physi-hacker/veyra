@@ -5,7 +5,7 @@
 | Streaming metadata scan + SQLite | implemented | implemented | model/adapters compile in principle; unverified |
 | Inode, hard links, allocated blocks | Unix metadata | Unix metadata | identity/allocation precision unavailable |
 | Native filesystem watcher | notify FSEvents adapter | notify inotify adapter | notify abstraction available; unverified |
-| Secure hashing / quarantine / undo / purge | no-follow + rename exclusive; descriptor-relative unlink | no-follow + rename no-replace; descriptor-relative unlink | explicitly unsupported |
+| Secure hashing / quarantine / undo / purge, files and whole folders | no-follow + rename exclusive; descriptor-relative unlink and tree removal | no-follow + rename no-replace; descriptor-relative unlink and tree removal | explicitly unsupported |
 | Application footprint | valid .app Info.plist + indexed exact bundle-id associations | indexed macOS bundle fixtures only | native app inventory unsupported |
 | CPU/memory/process/volume snapshots | sysinfo | sysinfo | dependency support exists; unverified |
 | Memory pressure, APFS exclusive blocks | unavailable | unavailable | unavailable |

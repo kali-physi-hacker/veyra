@@ -432,8 +432,8 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
         ("/", "filter names, e.g. *.zip"),
         ("] [", "next / previous page of results"),
         ("c", "review cleanup candidates here"),
-        ("x  space", "toggle a cleanup candidate"),
-        ("a  n", "select all on page · clear selection"),
+        ("x  space", "toggle a cleanup candidate or folder"),
+        ("a  n", "select the page or every folder · clear"),
         ("A", "select the largest 1,000 candidates here"),
         ("p", "create an immutable cleanup plan"),
         ("u", "restore a quarantined operation"),
@@ -695,8 +695,11 @@ fn render_operations(frame: &mut Frame, app: &mut App, area: Rect) {
                 ),
                 Span::styled(
                     format!(
-                        "{} files · {} · {}",
-                        operation.items.len(),
+                        "{} · {} · {}",
+                        widgets::count_label(
+                            operation.items.len(),
+                            operation.items.iter().any(|i| i.folder.is_some())
+                        ),
                         state,
                         widgets::age(operation.created_at)
                     ),

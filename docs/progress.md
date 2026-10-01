@@ -226,3 +226,37 @@ The quarantine folder was empty afterwards, and the audit held one record per de
 - A purge only reaches files a quarantine has moved. Quarantine still takes a thousand files per plan, so a large `target` needs several rounds.
 - A same-user process that swaps a quarantined file between the final identity check and the unlink is outside what a local application can prevent. The quarantine folder is private to the user.
 - On APFS, local snapshots keep deleted blocks until they expire, so free space can lag a purge.
+
+## Whole folders — 2026-10-02
+
+### Found
+
+A plan held at most a thousand files, each hashed in full, so a Cargo `target` of tens of thousands of files took many rounds. A quarantined file also stayed in the index, so the next *Select largest 1,000* picked the same files again and their plan failed.
+
+### Implemented
+
+- Folder plans: `PlanRequest.folders` and `stratum cleanup plan --folder` take up to 100 recognised folders, a `target` beside its `Cargo.toml`, `.npm/_cacache` or `.cargo/registry/cache`. `secure_fs::survey_tree` counts each through no-follow descriptors and refuses one holding a protected name or another filesystem; folders holding an indexed root, a protected path or Stratum's state are refused too.
+- Execution moves each folder with one no-clobber rename, after checking it is the same directory and still recognised. Undo renames it back without replacing a rebuilt folder, and a purge removes the tree with `secure_fs::remove_tree`, which never follows a symlink or crosses a filesystem.
+- `DELETE <plan-id>` runs any plan as quarantine then purge in one operation. It is refused, with nothing moved, while `purge_after_hours` is set.
+- The index follows moves: `Store::remove_subtree` drops a moved folder and takes its bytes from every ancestor, moved files leave as single entries and restored files return. Cleanup folders no longer on disk are not offered.
+- Desktop: folders on the list can be ticked and planned whole, and the plan review offers *Quarantine · reversible* or *Delete permanently*, each with its phrase. Terminal: `x`, `a` and `p` on the folder list, and the review takes either phrase.
+- Tests cover the survey and removal, folder plans and their refusals, a replaced and a recreated folder, the delete phrase and its waiting period, index updates for files and folders, and the command-line, desktop and terminal flows.
+
+### Measurements
+
+Release build on the development machine, with a synthetic Cargo `target` of 50,010 files in 403 folders, 729 MB. Times include process start.
+
+| Step | Time |
+| --- | --- |
+| Plan, surveying the folder | 0.14 s |
+| Quarantine, one rename and the index update | 0.46 s |
+| Purge | 2.90 s |
+| Delete in one step | 2.86 s |
+
+This repository's own `target`, 52,683 files and 8.87 GB, planned in 0.36 s from an index in a scratch state directory.
+
+### Limits
+
+- Only a folder's identity is checked before it moves, so anything written into it after the plan moves with it. Stop builds first.
+- A restored folder returns to the index with the next scan.
+- Hard links inside a folder are removed like any file, and their bytes are freed only when the last link goes, so freed space can be less than the folder's total.

@@ -148,9 +148,7 @@ fn approval_button_requires_exact_phrase_and_undo_restores_bytes() {
     assert!(app.selected.is_empty());
     app.plan = Some(
         engine
-            .create_cleanup_plan(PlanRequest {
-                paths: vec![path.clone()],
-            })
+            .create_cleanup_plan(PlanRequest::of_files(vec![path.clone()]))
             .unwrap(),
     );
     let phrase = app.plan.as_ref().unwrap().approval_phrase.clone();
@@ -381,9 +379,9 @@ fn largest_selection_then_a_separate_phrase_deletes_quarantined_files() {
     settle(&mut app);
     assert_eq!(app.selected.len(), 3, "{:?}", app.error);
     let plan = engine
-        .create_cleanup_plan(PlanRequest {
-            paths: app.selected.keys().cloned().collect(),
-        })
+        .create_cleanup_plan(PlanRequest::of_files(
+            app.selected.keys().cloned().collect(),
+        ))
         .unwrap();
     let operation = engine
         .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
@@ -446,4 +444,70 @@ fn largest_selection_then_a_separate_phrase_deletes_quarantined_files() {
         "the outcome reports what was deleted"
     );
     assert!(!text.iter().any(|(t, _)| t == "Delete permanently…"));
+}
+
+#[test]
+fn ticked_folders_are_deleted_whole_with_the_delete_phrase() {
+    let (temp, engine) = fixture_engine();
+    let root = temp.path().join("project");
+    std::fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]").unwrap();
+    for i in 0..4 {
+        std::fs::write(
+            root.join(format!("target/debug/deps/lib{i}.rlib")),
+            vec![i as u8; 2048],
+        )
+        .unwrap();
+    }
+    engine.scan_location(root.to_str().unwrap()).unwrap();
+    let target = std::fs::canonicalize(root.join("target")).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = App::new(&ctx, engine.clone(), Page::Cleanup);
+    settle(&mut app);
+    assert_eq!(app.locations.len(), 1);
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    let at = |text: &[(String, egui::Pos2)], label: &str| {
+        text.iter()
+            .filter(|(t, _)| t == label)
+            .map(|(_, p)| *p)
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap_or_else(|| panic!("{label} must be visible"))
+    };
+    click(&mut app, &ctx, at(&text, "Select all folders"));
+    assert_eq!(app.selected_folders.len(), 1);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    assert!(text.iter().any(|(t, _)| t.starts_with("1 folder selected")));
+    click(&mut app, &ctx, at(&text, "Review folder plan"));
+    settle(&mut app);
+    let plan = app.plan.clone().expect("a folder plan");
+    assert_eq!(plan.items[0].folder.unwrap().files, 4);
+    frame(&mut app, &ctx, vec![], 1280.0);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    assert!(text.iter().any(|(t, _)| t == "EXACT FOLDERS IN THIS PLAN"));
+    // The segmented choice comes first; the action button sits below it.
+    let choice = text
+        .iter()
+        .filter(|(t, _)| t == "Delete permanently")
+        .map(|(_, p)| *p)
+        .min_by(|a, b| a.y.total_cmp(&b.y))
+        .unwrap();
+    click(&mut app, &ctx, choice);
+    assert!(app.plan_delete);
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    assert!(text.iter().any(|(t, _)| t == &plan.delete_phrase));
+    app.approval = plan.approval_phrase.clone();
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    click(&mut app, &ctx, at(&text, "Delete permanently"));
+    assert!(!app.busy, "the quarantine phrase does not delete");
+    assert!(target.is_dir());
+    app.approval = plan.delete_phrase.clone();
+    let text = frame(&mut app, &ctx, vec![], 1280.0);
+    click(&mut app, &ctx, at(&text, "Delete permanently"));
+    settle(&mut app);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(app.operation.as_ref().unwrap().status, "purged");
+    assert!(!target.exists());
+    assert!(root.join("Cargo.toml").is_file());
+    assert!(app.selected_folders.is_empty());
 }

@@ -2,7 +2,7 @@
 use super::{empty_state, wrap_text};
 use crate::{
     app::{App, CleanupPhase, CleanupRow, PAGE_SIZE},
-    widgets::{self, card_accent},
+    widgets::{self, card_accent, count_label},
 };
 use ratatui::{
     Frame,
@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 theme.bold(theme.amber),
             ),
             Span::styled(
-                " Deleting quarantined files permanently is a separate, typed step. Stop active builds first.",
+                " A plan's DELETE phrase, or a later purge, frees it. Stop active builds first.",
                 theme.muted(),
             ),
         ]))
@@ -77,30 +77,37 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(1),
     ])
     .areas(area);
-    let selected_bytes: u64 = app.selected.values().sum();
+    let ticked_bytes: u64 = app.selected_folders.values().sum();
     let total: u64 = app.locations.iter().map(|l| l.logical_bytes).sum();
-    frame.render_widget(
-        Line::from(vec![
-            Span::styled(format!("{} folders", app.locations.len()), theme.strong()),
-            Span::styled(
-                format!(" · {} in the index", widgets::bytes(total)),
-                theme.muted(),
+    let mut summary = vec![
+        Span::styled(count_label(app.locations.len(), true), theme.strong()),
+        Span::styled(
+            format!(" · {} in the index", widgets::bytes(total)),
+            theme.muted(),
+        ),
+        Span::styled(
+            format!("   {} ticked", app.selected_folders.len()),
+            if app.selected_folders.is_empty() {
+                theme.faint()
+            } else {
+                theme.bold(theme.teal)
+            },
+        ),
+        Span::styled(
+            format!(" · {}", widgets::bytes(ticked_bytes)),
+            theme.faint(),
+        ),
+    ];
+    if !app.selected.is_empty() {
+        summary.push(Span::styled(
+            format!(
+                "   {} selected inside folders",
+                count_label(app.selected.len(), false)
             ),
-            Span::styled(
-                format!("   {} selected", app.selected.len()),
-                if app.selected.is_empty() {
-                    theme.faint()
-                } else {
-                    theme.bold(theme.teal)
-                },
-            ),
-            Span::styled(
-                format!(" · {}", widgets::bytes(selected_bytes)),
-                theme.faint(),
-            ),
-        ]),
-        bar,
-    );
+            theme.muted(),
+        ));
+    }
+    frame.render_widget(Line::from(summary), bar);
     if app.locations.is_empty() {
         if !app.waiting() {
             empty_state(
@@ -117,7 +124,7 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         let largest = app.locations.first().map_or(1, |l| l.logical_bytes.max(1));
         let cells = 10;
         let kind_width = 21;
-        let path_width = width.saturating_sub(kind_width + cells + 14);
+        let path_width = width.saturating_sub(kind_width + cells + 18);
         let items: Vec<ListItem> = app
             .locations
             .iter()
@@ -127,7 +134,16 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     theme.teal
                 };
+                let ticked = app.selected_folders.contains_key(&location.path);
                 let mut spans = vec![
+                    Span::styled(
+                        if ticked { "[x] " } else { "[ ] " },
+                        if ticked {
+                            theme.bold(theme.teal)
+                        } else {
+                            theme.faint()
+                        },
+                    ),
                     Span::styled(
                         widgets::fit(folder_kind(location), kind_width),
                         theme.color(color),
@@ -177,7 +193,7 @@ fn render_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or_else(|| "Open a folder to choose exact files; nothing is preselected.".into());
     frame.render_widget(
         Line::from(vec![
-            Span::styled("⏎ open  ", theme.muted()),
+            Span::styled("x tick · ⏎ open  ", theme.muted()),
             Span::styled(
                 widgets::truncate_end(&reason, footer.width.saturating_sub(10) as usize),
                 theme.faint(),
@@ -345,28 +361,46 @@ fn render_selection(frame: &mut Frame, app: &mut App, area: Rect) {
         footer,
     );
 }
+/// The plan review. Either phrase runs it: `QUARANTINE` moves the items aside, `DELETE` also
+/// purges them. The phrases and the input come before the list, so a short terminal cuts the
+/// list instead.
 fn render_plan(frame: &mut Frame, app: &App, area: Rect) {
     let theme = app.theme;
     let Some(plan) = &app.plan else {
         return;
     };
-    let block = card_accent(&theme, "Immutable plan · no files have moved", theme.amber);
+    let block = card_accent(&theme, "Immutable plan · nothing has moved", theme.amber);
     let inner = block.inner(area);
-    let width = inner.width as usize;
+    let width = (inner.width as usize).max(1);
     let remaining = plan.expires_at.saturating_sub(now()).max(0);
+    let folders = plan.items.iter().any(|i| i.folder.is_some());
+    let files: u64 = plan
+        .items
+        .iter()
+        .map(|i| i.folder.map_or(1, |f| f.files))
+        .sum();
+    let delete = delete_phrase(&plan.id);
     let mut lines = vec![
         Line::from(vec![
             Span::styled(widgets::bytes(plan.total_bytes), theme.strong()),
             Span::styled(
                 format!(
-                    " across {} file{} · {} risk · {}",
-                    plan.items.len(),
-                    if plan.items.len() == 1 { "" } else { "s" },
+                    " in {}{} · {} risk · {}",
+                    count_label(plan.items.len(), folders),
+                    if folders {
+                        format!(" · {}", count_label(files as usize, false))
+                    } else {
+                        String::new()
+                    },
                     plan.risk,
                     if remaining == 0 {
                         "expired".to_string()
                     } else {
-                        format!("expires in {} min", remaining / 60)
+                        format!(
+                            "expires in {} h {} min",
+                            remaining / 3600,
+                            remaining % 3600 / 60
+                        )
                     }
                 ),
                 if remaining == 0 {
@@ -376,11 +410,81 @@ fn render_plan(frame: &mut Frame, app: &App, area: Rect) {
                 },
             ),
         ]),
-        Line::raw(""),
-        Line::styled("Exact files in this plan", theme.eyebrow()),
+        Line::styled(
+            "Authorization is separate. Type one phrase exactly, then press Enter:",
+            theme.text(),
+        ),
+        Line::from(vec![
+            Span::styled(plan.approval_phrase.clone(), theme.bold(theme.accent)),
+            Span::styled("  quarantine · can be restored", theme.muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(delete.clone(), theme.bold(theme.rose)),
+            Span::styled(
+                if app.engine.config.purge_after_hours > 0 {
+                    format!(
+                        "  delete · only after {} h in quarantine",
+                        app.engine.config.purge_after_hours
+                    )
+                } else {
+                    "  delete permanently · cannot be undone".to_string()
+                },
+                theme.muted(),
+            ),
+        ]),
     ];
-    let listing_rows = inner.height.saturating_sub(10) as usize;
-    for item in plan.items.iter().take(listing_rows.max(3)) {
+    let matches = app.approval_matches();
+    let deleting = app.approval == delete;
+    lines.push(Line::from(vec![
+        Span::styled("▏", theme.faint()),
+        Span::styled(app.approval.clone(), theme.text()),
+        Span::styled("█", theme.color(widgets::pulse(&theme, app.tick))),
+        Span::styled(
+            if matches && deleting {
+                "  ✓ matches · Enter deletes permanently"
+            } else if matches {
+                "  ✓ matches · Enter authorizes quarantine"
+            } else if app.approval.is_empty() {
+                "  waiting for an exact phrase"
+            } else {
+                "  ✗ does not match yet"
+            },
+            if matches && deleting {
+                theme.color(theme.rose)
+            } else if matches {
+                theme.color(theme.teal)
+            } else {
+                theme.muted()
+            },
+        ),
+    ]));
+    lines.push(widgets::hints(
+        &theme,
+        &[
+            ("Enter", "run"),
+            ("Esc", "discard plan"),
+            ("^U", "clear input"),
+        ],
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        if folders {
+            "Exact folders in this plan"
+        } else {
+            "Exact files in this plan"
+        },
+        theme.eyebrow(),
+    ));
+    // Whatever height the wrapped lines above leave, less one line for "… and N more".
+    let used: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+    let room = (inner.height as usize).saturating_sub(used + 1);
+    let shown = plan.items.len().min(room);
+    for item in plan.items.iter().take(shown) {
+        let path = widgets::short_path(&item.path);
+        let label = match item.folder {
+            Some(folder) => format!("{path} · {}", count_label(folder.files as usize, false)),
+            None => path,
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 widgets::pad_left(&widgets::bytes(item.bytes), 11),
@@ -389,59 +493,18 @@ fn render_plan(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!(
                     "  {}",
-                    widgets::truncate_middle(
-                        &widgets::short_path(&item.path),
-                        width.saturating_sub(14)
-                    )
+                    widgets::truncate_middle(&label, width.saturating_sub(14))
                 ),
                 theme.muted(),
             ),
         ]));
     }
-    if plan.items.len() > listing_rows.max(3) {
+    if plan.items.len() > shown {
         lines.push(Line::styled(
-            format!("… and {} more", plan.items.len() - listing_rows.max(3)),
+            format!("… and {} more", plan.items.len() - shown),
             theme.faint(),
         ));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Authorization is separate. Type the phrase exactly, then press Enter:",
-        theme.text(),
-    ));
-    lines.push(Line::styled(
-        plan.approval_phrase.clone(),
-        theme.bold(theme.accent),
-    ));
-    let matches = app.approval_matches();
-    lines.push(Line::from(vec![
-        Span::styled("▏", theme.faint()),
-        Span::styled(app.approval.clone(), theme.text()),
-        Span::styled("█", theme.color(widgets::pulse(&theme, app.tick))),
-        Span::styled(
-            if matches {
-                "  ✓ matches · Enter authorizes quarantine"
-            } else if app.approval.is_empty() {
-                "  waiting for the exact phrase"
-            } else {
-                "  ✗ does not match yet"
-            },
-            if matches {
-                theme.color(theme.teal)
-            } else {
-                theme.muted()
-            },
-        ),
-    ]));
-    lines.push(Line::raw(""));
-    lines.push(widgets::hints(
-        &theme,
-        &[
-            ("Enter", "authorize"),
-            ("Esc", "discard plan"),
-            ("^U", "clear input"),
-        ],
-    ));
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
@@ -468,9 +531,12 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(operation.id.clone(), theme.muted()),
             Span::styled(
                 format!(
-                    "  ·  {}  ·  {} files",
+                    "  ·  {}  ·  {}",
                     widgets::age(operation.created_at),
-                    operation.items.len()
+                    count_label(
+                        operation.items.len(),
+                        operation.items.iter().any(|i| i.folder.is_some())
+                    )
                 ),
                 theme.faint(),
             ),
@@ -500,7 +566,14 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(
                 widgets::truncate_middle(
-                    &widgets::short_path(&item.source),
+                    &match item.folder {
+                        Some(folder) => format!(
+                            "{} · folder of {}",
+                            widgets::short_path(&item.source),
+                            count_label(folder.files as usize, false)
+                        ),
+                        None => widgets::short_path(&item.source),
+                    },
                     width.saturating_sub(18),
                 ),
                 theme.muted(),
@@ -520,8 +593,8 @@ fn render_outcome(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::styled(
         if held > 0 {
             format!(
-                "{held} file{} · {} held in quarantine on the same filesystem. They can be restored while their original location is free, or deleted permanently.",
-                if held == 1 { "" } else { "s" },
+                "{} · {} held in quarantine on the same filesystem. They can be restored while their original location is free, or deleted permanently.",
+                count_label(held, operation.items.iter().any(|i| i.folder.is_some())),
                 widgets::bytes(operation.purgeable_bytes())
             )
         } else if purged > 0 {
@@ -559,6 +632,7 @@ fn render_purge(frame: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let held: Vec<&QuarantineItem> = operation.purgeable().collect();
+    let folders = held.iter().any(|i| i.folder.is_some());
     let block = card_accent(
         &theme,
         "Delete permanently · this cannot be undone",
@@ -570,16 +644,16 @@ fn render_purge(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(widgets::bytes(operation.purgeable_bytes()), theme.strong()),
             Span::styled(
-                format!(
-                    " in {} quarantined file{}",
-                    held.len(),
-                    if held.len() == 1 { "" } else { "s" }
-                ),
+                format!(" in {} in quarantine", count_label(held.len(), folders)),
                 theme.muted(),
             ),
         ]),
         Line::styled(
-            "The files skip the Trash and Stratum cannot restore them. Each is checked against the content hash recorded when it moved; anything that changed stays in quarantine.",
+            if folders {
+                "Everything inside skips the Trash and Stratum cannot restore it. A folder goes only while it is still the one that moved; symlinks inside are removed, never followed."
+            } else {
+                "The files skip the Trash and Stratum cannot restore them. Each is checked against the content hash recorded when it moved; anything that changed stays in quarantine."
+            },
             theme.text(),
         ),
         Line::raw(""),
@@ -633,7 +707,14 @@ fn render_purge(frame: &mut Frame, app: &App, area: Rect) {
         ],
     ));
     lines.push(Line::raw(""));
-    lines.push(Line::styled("Files to delete", theme.eyebrow()));
+    lines.push(Line::styled(
+        if folders {
+            "Folders to delete"
+        } else {
+            "Files to delete"
+        },
+        theme.eyebrow(),
+    ));
     // Whatever height the wrapped lines above leave, less one line for "… and N more".
     let used: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
     let room = (inner.height as usize).saturating_sub(used + 1);
@@ -641,7 +722,7 @@ fn render_purge(frame: &mut Frame, app: &App, area: Rect) {
     for item in held.iter().take(shown) {
         lines.push(Line::from(vec![
             Span::styled(
-                widgets::pad_left(&widgets::bytes(item.identity.size), 11),
+                widgets::pad_left(&widgets::bytes(item.bytes()), 11),
                 theme.text(),
             ),
             Span::styled(

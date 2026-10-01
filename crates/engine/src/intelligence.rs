@@ -23,6 +23,24 @@ pub trait CleanupRule: Send + Sync {
 
 const CARGO_TARGET_REASON: &str = "File inside target beside a Cargo.toml manifest. Usually rebuildable, but local edits and active builds remain possible.";
 const PACKAGE_CACHE_REASON: &str = "File inside a recognized downloaded package cache. Restoring dependencies may require network access.";
+const CARGO_TARGET_FOLDER_REASON: &str = "Cargo build output beside a Cargo.toml manifest. The next build recreates it, but local edits and active builds remain possible.";
+const PACKAGE_CACHE_FOLDER_REASON: &str = "A recognized downloaded package cache. The next install or build refills it, which may require network access.";
+
+/// The category and reason when `path` is a whole folder the cleanup rules recognise: a Cargo
+/// `target` directory beside its manifest, npm's `_cacache` or Cargo's registry cache.
+pub(crate) fn recognised_folder(path: &Path) -> Option<(&'static str, &'static str)> {
+    let name = path.file_name()?;
+    let parent = path.parent()?;
+    if name == "target" && parent.join("Cargo.toml").is_file() {
+        Some(("developer_build_artifact", CARGO_TARGET_FOLDER_REASON))
+    } else if (name == "_cacache" && parent.file_name().is_some_and(|n| n == ".npm"))
+        || path.ends_with(".cargo/registry/cache")
+    {
+        Some(("package_cache", PACKAGE_CACHE_FOLDER_REASON))
+    } else {
+        None
+    }
+}
 
 pub struct RegeneratableRule;
 impl CleanupRule for RegeneratableRule {
@@ -111,19 +129,7 @@ impl Engine {
                 .into_iter()
                 .filter_map(|d| {
                     let path = Path::new(&d.path);
-                    let parent = path.parent()?;
-                    let (category, reason) = match d.name.as_str() {
-                        "target" if parent.join("Cargo.toml").is_file() => {
-                            ("developer_build_artifact", CARGO_TARGET_REASON)
-                        }
-                        "_cacache" if parent.file_name().is_some_and(|n| n == ".npm") => {
-                            ("package_cache", PACKAGE_CACHE_REASON)
-                        }
-                        "cache" if d.path.ends_with("/.cargo/registry/cache") => {
-                            ("package_cache", PACKAGE_CACHE_REASON)
-                        }
-                        _ => return None,
-                    };
+                    let (category, reason) = recognised_folder(path)?;
                     self.cleanup_path_allowed(path).ok()?;
                     Some(CleanupLocation {
                         path: d.path,
@@ -154,10 +160,15 @@ impl Engine {
             });
             Ok(kept)
         };
-        match scope {
-            None => self.cached("cleanup_locations", find),
-            Some(_) => find(),
-        }
+        let found = match scope {
+            None => self.cached("cleanup_locations", find)?,
+            Some(_) => find()?,
+        };
+        // A folder removed since the scan, by a cleanup or anything else, is not offered.
+        Ok(found
+            .into_iter()
+            .filter(|l| std::fs::symlink_metadata(&l.path).is_ok_and(|m| m.is_dir()))
+            .collect())
     }
     pub fn cleanup_candidates(&self, query: &FileQuery) -> Result<Page<CleanupCandidate>> {
         let rule = RegeneratableRule;

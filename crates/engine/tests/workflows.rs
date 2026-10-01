@@ -58,9 +58,7 @@ impl Fixture {
     }
     fn plan(&self) -> CleanupPlan {
         self.engine
-            .create_cleanup_plan(PlanRequest {
-                paths: vec![self.artifact()],
-            })
+            .create_cleanup_plan(PlanRequest::of_files(vec![self.artifact()]))
             .unwrap()
     }
 }
@@ -263,9 +261,7 @@ fn large_recent_observation_does_not_imply_cleanup_eligibility() {
     );
     assert_eq!(
         f.engine
-            .create_cleanup_plan(PlanRequest {
-                paths: vec![path.display().to_string()]
-            })
+            .create_cleanup_plan(PlanRequest::of_files(vec![path.display().to_string()]))
             .unwrap_err()
             .code,
         "invalid_cleanup_plan"
@@ -450,7 +446,7 @@ fn roots_sources_directories_and_wildcards_are_not_cleanup_candidates() {
     ] {
         assert!(
             f.engine
-                .create_cleanup_plan(PlanRequest { paths: vec![path] })
+                .create_cleanup_plan(PlanRequest::of_files(vec![path]))
                 .is_err()
         );
     }
@@ -480,11 +476,9 @@ fn protected_configuration_blocks_even_known_artifacts() {
     config.protected_paths.push(f.root.join("project"));
     let e = Engine::open(config).unwrap();
     assert_eq!(
-        e.create_cleanup_plan(PlanRequest {
-            paths: vec![f.artifact()]
-        })
-        .unwrap_err()
-        .code,
+        e.create_cleanup_plan(PlanRequest::of_files(vec![f.artifact()]))
+            .unwrap_err()
+            .code,
         "protected_path"
     );
 }
@@ -901,7 +895,10 @@ fn quarantined(f: &Fixture, names: &[&str]) -> CleanupOperation {
         .iter()
         .map(|n| debug.join(n).to_string_lossy().into_owned())
         .collect();
-    let p = f.engine.create_cleanup_plan(PlanRequest { paths }).unwrap();
+    let p = f
+        .engine
+        .create_cleanup_plan(PlanRequest::of_files(paths))
+        .unwrap();
     let op = f
         .engine
         .execute_cleanup_plan(&p.id, &p.approval_phrase)
@@ -1066,4 +1063,251 @@ fn purge_never_deletes_outside_the_operation_quarantine_folder() {
     assert_eq!(purged.items[0].status, "purge_failed");
     assert!(purged.items[0].error.as_ref().unwrap().contains("outside"));
     assert!(outside.is_file());
+}
+/// Adds build output beside the fixture's artifact and scans; returns the target folder.
+fn target_folder(f: &Fixture) -> String {
+    let target = f.root.join("project/target");
+    fs::create_dir_all(target.join("debug/deps")).unwrap();
+    fs::create_dir_all(target.join("release")).unwrap();
+    fs::write(target.join("debug/deps/a.rlib"), vec![1u8; 3000]).unwrap();
+    fs::write(target.join("debug/deps/b.rlib"), vec![2u8; 2000]).unwrap();
+    fs::write(target.join("release/app"), vec![3u8; 1000]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        f.root.join("project/Cargo.toml"),
+        target.join("manifest-link"),
+    )
+    .unwrap();
+    f.scan();
+    target.to_string_lossy().into_owned()
+}
+#[test]
+fn a_whole_folder_moves_in_one_step_leaves_the_index_and_comes_back() {
+    let f = Fixture::new();
+    let target = target_folder(&f);
+    assert!(
+        f.engine
+            .cleanup_locations(None)
+            .unwrap()
+            .iter()
+            .any(|l| l.path == target)
+    );
+    let project_before = f
+        .engine
+        .inspect_entry(&f.root.join("project").to_string_lossy())
+        .unwrap();
+    let plan = f
+        .engine
+        .create_cleanup_plan(PlanRequest::of_folders(vec![target.clone()]))
+        .unwrap();
+    assert_eq!(plan.action, "quarantine_folders");
+    assert_eq!(plan.delete_phrase, format!("DELETE {}", plan.id));
+    let folder = plan.items[0]
+        .folder
+        .expect("a folder item carries its contents");
+    assert_eq!(folder.directories, 3, "debug, debug/deps and release");
+    assert_eq!(folder.files, 5, "four files and a symlink");
+    assert!(plan.items[0].bytes >= 6000 + "build artifact contents".len() as u64);
+    let op = f
+        .engine
+        .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
+        .unwrap();
+    assert_eq!(op.status, "completed");
+    assert!(!PathBuf::from(&target).exists());
+    let held = PathBuf::from(&op.items[0].destination);
+    assert_eq!(fs::read(held.join("release/app")).unwrap(), vec![3u8; 1000]);
+    // The index no longer lists the folder or anything in it, and its parent shrank.
+    assert_eq!(
+        f.engine.inspect_entry(&target).unwrap_err().code,
+        "path_not_found"
+    );
+    assert_eq!(
+        f.engine.inspect_entry(&f.artifact()).unwrap_err().code,
+        "path_not_found"
+    );
+    let project_after = f
+        .engine
+        .inspect_entry(&f.root.join("project").to_string_lossy())
+        .unwrap();
+    assert!(project_after.logical_bytes + 6000 <= project_before.logical_bytes);
+    assert!(f.engine.cleanup_locations(None).unwrap().is_empty());
+    let restored = f.engine.undo_cleanup(&op.id).unwrap();
+    assert_eq!(restored.status, "restored");
+    assert_eq!(
+        fs::read(PathBuf::from(&target).join("release/app")).unwrap(),
+        vec![3u8; 1000]
+    );
+    assert_eq!(
+        fs::read_to_string(f.artifact()).unwrap(),
+        "build artifact contents"
+    );
+}
+#[test]
+fn the_delete_phrase_removes_a_whole_folder_in_one_operation() {
+    let f = Fixture::new();
+    let target = target_folder(&f);
+    let plan = f
+        .engine
+        .create_cleanup_plan(PlanRequest::of_folders(vec![target.clone()]))
+        .unwrap();
+    assert_eq!(
+        f.engine
+            .execute_cleanup_plan(&plan.id, &purge_phrase(&plan.id))
+            .unwrap_err()
+            .code,
+        "approval_required",
+        "a purge phrase never runs a plan"
+    );
+    let op = f
+        .engine
+        .execute_cleanup_plan(&plan.id, &plan.delete_phrase)
+        .unwrap();
+    assert_eq!(op.status, "purged");
+    assert_eq!(op.items[0].status, "purged");
+    assert_eq!(op.purged_bytes(), plan.total_bytes);
+    assert!(!PathBuf::from(&target).exists());
+    assert!(!PathBuf::from(&op.items[0].destination).exists());
+    assert!(
+        f.root.join("project/Cargo.toml").is_file(),
+        "a symlink inside the folder is removed, never followed"
+    );
+    assert_eq!(f.engine.undo_cleanup(&op.id).unwrap_err().code, "conflict");
+    let audit = f.store().audit_records(100, 0).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|a| a.action == "cleanup_started"
+                && a.detail.contains("permanent deletion approved"))
+    );
+    assert!(audit.iter().any(|a| a.action == "purge_completed"));
+}
+#[test]
+fn folder_plans_take_only_whole_recognised_folders() {
+    let f = Fixture::new();
+    let target = target_folder(&f);
+    let plan = |folders: Vec<String>| {
+        f.engine
+            .create_cleanup_plan(PlanRequest::of_folders(folders))
+            .unwrap_err()
+            .code
+    };
+    fs::create_dir_all(f.root.join("project/src")).unwrap();
+    fs::create_dir_all(f.root.join("loose/target")).unwrap();
+    fs::write(f.root.join("loose/target/x"), "x").unwrap();
+    f.scan();
+    let path = |p: &str| f.root.join(p).to_string_lossy().into_owned();
+    assert_eq!(plan(vec![path("project/src")]), "invalid_cleanup_plan");
+    assert_eq!(
+        plan(vec![path("loose/target")]),
+        "invalid_cleanup_plan",
+        "no Cargo.toml beside it"
+    );
+    assert_eq!(
+        plan(vec![f.root.to_string_lossy().into_owned()]),
+        "protected_path"
+    );
+    assert_eq!(
+        plan(vec![target.clone(), path("project/target/debug")]),
+        "invalid_request"
+    );
+    let mixed = f.engine.create_cleanup_plan(PlanRequest {
+        paths: vec![f.artifact()],
+        folders: vec![target.clone()],
+    });
+    assert_eq!(mixed.unwrap_err().code, "invalid_request");
+    fs::create_dir_all(PathBuf::from(&target).join("debug/build/vendored/.git")).unwrap();
+    assert_eq!(
+        plan(vec![target.clone()]),
+        "protected_path",
+        "a protected name inside refuses the folder"
+    );
+}
+#[test]
+fn a_replaced_folder_invalidates_its_plan_and_a_recreated_one_is_never_overwritten() {
+    let f = Fixture::new();
+    let target = target_folder(&f);
+    let plan = f
+        .engine
+        .create_cleanup_plan(PlanRequest::of_folders(vec![target.clone()]))
+        .unwrap();
+    fs::rename(&target, f.root.join("project/old-target")).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(PathBuf::from(&target).join("fresh"), "new build").unwrap();
+    assert_eq!(
+        f.engine
+            .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
+            .unwrap_err()
+            .code,
+        "filesystem_changed"
+    );
+    assert!(PathBuf::from(&target).join("fresh").is_file());
+    assert!(f.root.join("project/old-target/release/app").is_file());
+    // Quarantine the new folder, rebuild under the same name, then restore: the rebuild stays.
+    f.scan();
+    let plan = f
+        .engine
+        .create_cleanup_plan(PlanRequest::of_folders(vec![target.clone()]))
+        .unwrap();
+    let op = f
+        .engine
+        .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
+        .unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(PathBuf::from(&target).join("rebuilt"), "rebuilt").unwrap();
+    let undone = f.engine.undo_cleanup(&op.id).unwrap();
+    assert_eq!(undone.status, "restore_partial");
+    assert!(PathBuf::from(&target).join("rebuilt").is_file());
+    assert!(
+        PathBuf::from(&op.items[0].destination)
+            .join("fresh")
+            .is_file()
+    );
+}
+#[test]
+fn delete_waits_when_time_in_quarantine_is_configured() {
+    let f = Fixture::new();
+    let target = target_folder(&f);
+    let mut config = f.engine.config.clone();
+    config.purge_after_hours = 2;
+    let waiting = Engine::open(config).unwrap();
+    let plan = waiting
+        .create_cleanup_plan(PlanRequest::of_folders(vec![target.clone()]))
+        .unwrap();
+    let error = waiting
+        .execute_cleanup_plan(&plan.id, &plan.delete_phrase)
+        .unwrap_err();
+    assert_eq!(error.code, "conflict");
+    assert!(PathBuf::from(&target).is_dir(), "nothing moved");
+    let op = waiting
+        .execute_cleanup_plan(&plan.id, &plan.approval_phrase)
+        .unwrap();
+    assert_eq!(op.status, "completed");
+}
+#[test]
+fn quarantined_files_leave_the_index_and_return_with_a_restore() {
+    let f = Fixture::new();
+    f.scan();
+    let listed = |f: &Fixture| {
+        f.engine
+            .cleanup_candidates(&FileQuery {
+                path: Some(f.root.join("project/target").to_string_lossy().into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .items
+            .iter()
+            .any(|c| c.path == f.artifact())
+    };
+    assert!(listed(&f));
+    let p = f.plan();
+    let op = f
+        .engine
+        .execute_cleanup_plan(&p.id, &p.approval_phrase)
+        .unwrap();
+    assert!(
+        !listed(&f),
+        "the next selection starts from what is still there"
+    );
+    f.engine.undo_cleanup(&op.id).unwrap();
+    assert!(listed(&f));
 }

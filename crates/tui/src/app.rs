@@ -347,6 +347,8 @@ pub struct App {
     pub cleanup_has_more: bool,
     pub cleanup_scope: Option<String>,
     pub selected: BTreeMap<String, u64>,
+    /// Whole recognised folders ticked on the folder list, with their indexed sizes.
+    pub selected_folders: BTreeMap<String, u64>,
     pub plan: Option<CleanupPlan>,
     pub operation: Option<CleanupOperation>,
     pub operations: Vec<CleanupOperation>,
@@ -431,6 +433,7 @@ impl App {
             cleanup_has_more: false,
             cleanup_scope: None,
             selected: BTreeMap::new(),
+            selected_folders: BTreeMap::new(),
             plan: None,
             operation: None,
             operations: Vec::new(),
@@ -488,10 +491,12 @@ impl App {
             self.engine.purge_ready_at(o).saturating_sub(now()).max(0)
         })
     }
+    /// The typed phrase runs the plan: `QUARANTINE <plan>` or `DELETE <plan>`.
     pub fn approval_matches(&self) -> bool {
-        self.plan
-            .as_ref()
-            .is_some_and(|p| p.approval_phrase == self.approval && now() < p.expires_at)
+        self.plan.as_ref().is_some_and(|p| {
+            (p.approval_phrase == self.approval || delete_phrase(&p.id) == self.approval)
+                && now() < p.expires_at
+        })
     }
     pub fn toast(&mut self, text: impl Into<String>, kind: ToastKind) {
         let text = text.into();
@@ -825,12 +830,12 @@ impl App {
                 self.rebuild_cleanup_rows();
             }
             Payload::Plan(plan) => {
-                self.status = "Plan ready for review · no files moved".into();
+                self.status = "Plan ready for review · nothing has moved".into();
                 self.plan = Some(*plan);
                 self.operation = None;
                 self.approval.clear();
                 self.toast(
-                    "Immutable plan created. Type the approval phrase to authorize.",
+                    "Immutable plan created. Type its QUARANTINE or DELETE phrase.",
                     ToastKind::Info,
                 );
             }
@@ -873,6 +878,7 @@ impl App {
                 self.purge_open = false;
                 self.purge_typed.clear();
                 self.selected.clear();
+                self.selected_folders.clear();
                 self.refresh();
             }
             Payload::Selection(candidates) => {
@@ -1096,8 +1102,8 @@ impl App {
         }
         if self.page == Page::Cleanup && self.cleanup_phase() == CleanupPhase::Review {
             return vec![
-                ("type", "approval phrase"),
-                ("Enter", "authorize quarantine"),
+                ("type", "QUARANTINE or DELETE phrase"),
+                ("Enter", "run the plan"),
                 ("Esc", "back to selection"),
             ];
         }
@@ -1141,6 +1147,8 @@ impl App {
             Page::Cleanup => match self.cleanup_phase() {
                 CleanupPhase::Select if self.cleanup_scope.is_none() => vec![
                     ("↑↓", "move"),
+                    ("x", "tick folder"),
+                    ("a", "all folders"),
                     ("⏎", "open folder"),
                     ("p", "plan"),
                     ("o", "operations"),
@@ -1675,7 +1683,7 @@ impl App {
                     let paths = self.selected.keys().cloned().collect();
                     self.task(move |engine| {
                         Ok(Payload::Plan(Box::new(
-                            engine.create_cleanup_plan(PlanRequest { paths })?,
+                            engine.create_cleanup_plan(PlanRequest::of_files(paths))?,
                         )))
                     });
                 }
@@ -1718,7 +1726,9 @@ impl App {
                             "This plan has expired. Create a new one.",
                             ToastKind::Warning,
                         );
-                    } else if self.approval == plan.approval_phrase {
+                    } else if self.approval == plan.approval_phrase
+                        || self.approval == delete_phrase(&plan.id)
+                    {
                         let approval = self.approval.clone();
                         self.task(move |engine| {
                             Ok(Payload::Operation(Box::new(
@@ -1949,18 +1959,57 @@ impl App {
                     self.refresh();
                 }
             }
-            KeyCode::Char('n') => self.selected.clear(),
+            KeyCode::Char('x' | ' ') => {
+                if let Some(location) = self
+                    .locations_nav
+                    .index(len)
+                    .and_then(|i| self.locations.get(i))
+                    .cloned()
+                {
+                    if self.selected_folders.remove(&location.path).is_none() {
+                        self.selected_folders
+                            .insert(location.path, location.logical_bytes);
+                    }
+                    self.locations_nav.step(len, 1);
+                }
+            }
+            KeyCode::Char('a') => {
+                if !self.locations.is_empty()
+                    && self
+                        .locations
+                        .iter()
+                        .all(|l| self.selected_folders.contains_key(&l.path))
+                {
+                    self.selected_folders.clear();
+                } else {
+                    for location in self.locations.iter().take(100) {
+                        self.selected_folders
+                            .insert(location.path.clone(), location.logical_bytes);
+                    }
+                }
+            }
+            KeyCode::Char('n') => {
+                self.selected.clear();
+                self.selected_folders.clear();
+            }
             KeyCode::Char('p') => {
-                if self.selected.is_empty() {
+                if !self.selected_folders.is_empty() {
+                    let folders = self.selected_folders.keys().cloned().collect();
+                    self.task(move |engine| {
+                        Ok(Payload::Plan(Box::new(
+                            engine.create_cleanup_plan(PlanRequest::of_folders(folders))?,
+                        )))
+                    });
+                } else if self.selected.is_empty() {
                     self.toast(
-                        "Open a folder and select exact files first",
+                        "Tick folders with x, or open one and select exact files",
                         ToastKind::Warning,
                     );
                 } else {
                     let paths = self.selected.keys().cloned().collect();
                     self.task(move |engine| {
                         Ok(Payload::Plan(Box::new(
-                            engine.create_cleanup_plan(PlanRequest { paths })?,
+                            engine.create_cleanup_plan(PlanRequest::of_files(paths))?,
                         )))
                     });
                 }

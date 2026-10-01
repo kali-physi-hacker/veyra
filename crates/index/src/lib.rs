@@ -1282,6 +1282,94 @@ impl Store {
         self.bump();
         Ok(true)
     }
+    /// Removes a directory and everything below it from a root's index, as a cleanup that moved
+    /// the folder away leaves it. Its ancestors, the category totals and the scan's totals lose
+    /// the folder's bytes in the same transaction. Returns false when the index holds no such
+    /// directory; the root itself is refused.
+    pub fn remove_subtree(&self, root: &str, path: &str) -> Result<bool> {
+        if path == root || !Path::new(path).starts_with(root) {
+            return Err(Error::invalid(
+                "Only a folder inside an indexed root can leave the index",
+            ));
+        }
+        let mut conn = self.writer()?;
+        let tx = conn.transaction().map_err(db)?;
+        let scan_id: String = tx
+            .query_row("SELECT scan_id FROM roots WHERE path=?1", [root], |r| {
+                r.get(0)
+            })
+            .map_err(db)?;
+        let Some((logical, allocated, parent)) = tx
+            .query_row(
+                "SELECT logical,allocated,parent FROM entries WHERE scan_id=?1 AND path=?2 AND kind='directory'",
+                params![scan_id, path],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+            )
+            .optional()
+            .map_err(db)?
+        else {
+            return Ok(false);
+        };
+        let (lower, upper) = subtree_bounds(path);
+        let categories: Vec<(String, i64, i64, i64)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT category,SUM(logical),SUM(allocated),COUNT(*) FROM entries WHERE scan_id=?1 AND path>=?2 AND path<?3 AND kind='file' GROUP BY category",
+                )
+                .map_err(db)?;
+            stmt.query_map(params![scan_id, lower, upper], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(db)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db)?
+        };
+        for (category, logical, allocated, files) in categories {
+            tx.execute(
+                "UPDATE category_totals SET logical=MAX(logical-?3,0),allocated=MAX(allocated-?4,0),files=MAX(files-?5,0) WHERE scan_id=?1 AND category=?2",
+                params![scan_id, category, logical, allocated, files],
+            )
+            .map_err(db)?;
+        }
+        tx.execute(
+            "DELETE FROM category_totals WHERE scan_id=?1 AND files=0",
+            [&scan_id],
+        )
+        .map_err(db)?;
+        let removed = tx
+            .execute(
+                "DELETE FROM entries WHERE scan_id=?1 AND (path=?2 OR (path>=?3 AND path<?4))",
+                params![scan_id, path, lower, upper],
+            )
+            .map_err(db)?;
+        tx.execute(
+            "DELETE FROM fingerprints WHERE path=?1 OR (path>=?2 AND path<?3)",
+            params![path, lower, upper],
+        )
+        .map_err(db)?;
+        for ancestor in Path::new(&parent)
+            .ancestors()
+            .take_while(|p| p.starts_with(root))
+        {
+            let ancestor = ancestor
+                .to_str()
+                .ok_or_else(|| Error::invalid("Non UTF-8 ancestor"))?;
+            tx.execute(
+                "UPDATE entries SET logical=MAX(logical-?3,0),allocated=MAX(allocated-?4,0) WHERE scan_id=?1 AND path=?2",
+                params![scan_id, ancestor, logical, allocated],
+            )
+            .map_err(db)?;
+        }
+        tx.execute(
+            "UPDATE scans SET logical=MAX(logical-?2,0),allocated=MAX(allocated-?3,0),entries=MAX(entries-?4,0) WHERE id=?1",
+            params![scan_id, logical, allocated, removed as i64],
+        )
+        .map_err(db)?;
+        tx.commit().map_err(db)?;
+        drop(conn);
+        self.bump();
+        Ok(true)
+    }
     pub fn snapshot_roots(&self, roots: &[String], retain_days: u32) -> Result<()> {
         let mut conn = self.writer()?;
         let tx = conn.transaction().map_err(db)?;

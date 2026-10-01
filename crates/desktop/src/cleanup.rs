@@ -8,8 +8,31 @@ impl App {
             return;
         }
         let p = self.palette;
-        let selected_bytes = self.selected.values().copied().sum::<u64>();
-        let count = self.selected.len();
+        // On the folder list the toolbar gathers whole folders, unless only files are chosen.
+        let folders = self.cleanup_scope.is_none()
+            && (!self.selected_folders.is_empty() || self.selected.is_empty());
+        let chosen = if folders {
+            &self.selected_folders
+        } else {
+            &self.selected
+        };
+        let count = chosen.len();
+        let selected_bytes = chosen.values().copied().sum::<u64>();
+        let (summary, caption) = if folders {
+            (
+                format!(
+                    "{} selected · {}",
+                    count_label(count, true),
+                    bytes(selected_bytes)
+                ),
+                "A whole folder moves in one step; deleting it is a separate choice.",
+            )
+        } else {
+            (
+                format!("{count} selected · {}", bytes(selected_bytes)),
+                "Quarantine first; deleting permanently is a separate step.",
+            )
+        };
         let mut card = Card::new().padding(12.0).radius(14.0);
         if count > 0 {
             card = card.tinted(p.accent);
@@ -20,7 +43,40 @@ impl App {
                 // The buttons are laid out first, from the right, so the summary on the left fits
                 // the space they leave instead of running under them in a narrow window.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if Button::primary("Create review plan")
+                    if folders {
+                        if Button::primary("Review folder plan")
+                            .icon(icons::LIST_CHECKS)
+                            .enabled(!self.busy && count > 0)
+                            .show(ui)
+                            .clicked()
+                        {
+                            let folders = self.selected_folders.keys().cloned().collect();
+                            self.task(Activity::Cleanup, move |e| {
+                                Ok(Payload::Plan(
+                                    e.create_cleanup_plan(PlanRequest::of_folders(folders))?,
+                                ))
+                            });
+                        }
+                        if Button::ghost("Clear")
+                            .small()
+                            .enabled(!self.busy && count > 0)
+                            .show(ui)
+                            .clicked()
+                        {
+                            self.selected_folders.clear();
+                        }
+                        if Button::ghost("Select all folders")
+                            .small()
+                            .enabled(!self.busy && !self.locations.is_empty())
+                            .show(ui)
+                            .clicked()
+                        {
+                            for location in self.locations.iter().take(100) {
+                                self.selected_folders
+                                    .insert(location.path.clone(), location.logical_bytes);
+                            }
+                        }
+                    } else if Button::primary("Create review plan")
                         .icon(icons::LIST_CHECKS)
                         .enabled(!self.busy && count > 0 && count <= 1000)
                         .show(ui)
@@ -28,22 +84,26 @@ impl App {
                     {
                         let paths = self.selected.keys().cloned().collect();
                         self.task(Activity::Cleanup, move |e| {
-                            Ok(Payload::Plan(e.create_cleanup_plan(PlanRequest { paths })?))
+                            Ok(Payload::Plan(
+                                e.create_cleanup_plan(PlanRequest::of_files(paths))?,
+                            ))
                         });
                     }
-                    if Button::ghost("Clear")
-                        .small()
-                        .enabled(!self.busy && count > 0)
-                        .show(ui)
-                        .clicked()
+                    if !folders
+                        && Button::ghost("Clear")
+                            .small()
+                            .enabled(!self.busy && count > 0)
+                            .show(ui)
+                            .clicked()
                     {
                         self.selected.clear();
                     }
-                    if Button::ghost("Select this page")
-                        .small()
-                        .enabled(!self.busy && !self.candidates.is_empty())
-                        .show(ui)
-                        .clicked()
+                    if !folders
+                        && Button::ghost("Select this page")
+                            .small()
+                            .enabled(!self.busy && !self.candidates.is_empty())
+                            .show(ui)
+                            .clicked()
                     {
                         for candidate in &self.candidates {
                             if self.selected.len() < 1000 {
@@ -66,19 +126,8 @@ impl App {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             let width = ui.available_width();
                             for (text, size, weight, color) in [
-                                (
-                                    format!("{count} selected · {}", bytes(selected_bytes)),
-                                    14.5,
-                                    Weight::SemiBold,
-                                    p.text,
-                                ),
-                                (
-                                    "Quarantine first; deleting permanently is a separate step."
-                                        .to_string(),
-                                    12.0,
-                                    Weight::Regular,
-                                    p.text_3,
-                                ),
+                                (summary.clone(), 14.5, Weight::SemiBold, p.text),
+                                (caption.to_string(), 12.0, Weight::Regular, p.text_3),
                             ] {
                                 let galley = kit::galley_truncated(
                                     ui,
@@ -137,7 +186,7 @@ impl App {
         kit::banner(
             ui,
             icons::ARCHIVE_BOX,
-            "Quarantine moves files into Stratum's private storage on the same filesystem, where they can be restored; on its own it frees no space. Space comes back when you delete a quarantine permanently from its outcome, behind a second typed phrase. Stop active builds before moving generated files.",
+            "Quarantine moves files or whole folders into Stratum's private storage on the same filesystem, where they can be restored; on its own it frees no space. To free it, choose Delete permanently when you approve a plan, or delete a quarantine later from its outcome. Stop active builds before moving generated files.",
             p.amber,
             false,
         );
@@ -292,9 +341,12 @@ impl App {
                     let color = kit::status_color(&p, &operation.status);
                     let held = operation.purgeable_bytes();
                     if Row::new(format!(
-                        "{} · {} files{}",
+                        "{} · {}{}",
                         humanize(&operation.status),
-                        operation.items.len(),
+                        count_label(
+                            operation.items.len(),
+                            operation.items.iter().any(|i| i.folder.is_some())
+                        ),
                         if held > 0 {
                             format!(" · {} in quarantine", bytes(held))
                         } else {
@@ -343,7 +395,7 @@ impl App {
         let p = self.palette;
         kit::caption(
             ui,
-            "Folders the cleanup rules recognise in the index, largest first: Cargo build output beside a Cargo.toml, npm's package cache and Cargo's registry cache. Open one to choose files from it; nothing is preselected.",
+            "Folders the cleanup rules recognise in the index, largest first: Cargo build output beside a Cargo.toml, npm's package cache and Cargo's registry cache. Tick folders to remove them whole, or open one to choose files from it; nothing is preselected.",
         );
         if self.locations.is_empty() {
             if self.queries.waiting() {
@@ -361,26 +413,35 @@ impl App {
         let total: u64 = self.locations.iter().map(|l| l.logical_bytes).sum();
         let largest = self.locations.first().map_or(1, |l| l.logical_bytes.max(1));
         let mut open = None;
+        let mut toggled = vec![];
         Card::new().padding(14.0).show(ui, |ui| {
             kit::label(
                 ui,
-                format!("{} folders · {}", self.locations.len(), bytes(total)),
+                format!("{} · {}", count_label(self.locations.len(), true), bytes(total)),
                 15.0,
                 Weight::SemiBold,
                 p.text,
             );
-            kit::caption(ui, "Sizes are the index's totals for each folder; quarantine moves the files you choose, up to a thousand per plan.");
+            kit::caption(ui, "Sizes are the index's totals for each folder. A ticked folder moves whole in one step; opening one lets you choose files, up to a thousand per plan.");
             ui.add_space(6.0);
             kit::divider(ui);
             for location in &self.locations {
                 let (icon, color) = kit::category_style(&p, &location.category);
-                let response = Row::new(short_path(&location.path))
-                    .plain_icon(icon, color)
-                    .subtitle(location_kind(&location.category, &location.path))
-                    .trailing(bytes(location.logical_bytes), p.text)
-                    .height(50.0)
-                    .chevron()
-                    .show(ui);
+                let mut checked = self.selected_folders.contains_key(&location.path);
+                let response = ui
+                    .horizontal(|ui| {
+                        if kit::checkbox(ui, &mut checked, !self.busy).changed() {
+                            toggled.push((location.path.clone(), location.logical_bytes, checked));
+                        }
+                        Row::new(short_path(&location.path))
+                            .plain_icon(icon, color)
+                            .subtitle(folder_kind(&location.path))
+                            .trailing(bytes(location.logical_bytes), p.text)
+                            .height(50.0)
+                            .chevron()
+                            .show(ui)
+                    })
+                    .inner;
                 kit::progress(
                     ui,
                     ui.available_width(),
@@ -394,6 +455,13 @@ impl App {
                 }
             }
         });
+        for (path, size, checked) in toggled {
+            if checked {
+                self.selected_folders.insert(path, size);
+            } else {
+                self.selected_folders.remove(&path);
+            }
+        }
         if let Some(path) = open {
             self.cleanup_scope = Some(path);
             self.offset = 0;
@@ -404,19 +472,43 @@ impl App {
         let p = self.palette;
         let remaining = plan.expires_at.saturating_sub(now()).max(0);
         let expired = remaining == 0;
+        let folders = plan.items.iter().any(|i| i.folder.is_some());
+        let files: u64 = plan
+            .items
+            .iter()
+            .map(|i| i.folder.map_or(1, |f| f.files))
+            .sum();
         Card::new().padding(22.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                kit::icon_tile(ui, icons::LIST_CHECKS, p.accent, 42.0);
+                kit::icon_tile(
+                    ui,
+                    if folders {
+                        icons::FOLDERS
+                    } else {
+                        icons::LIST_CHECKS
+                    },
+                    p.accent,
+                    42.0,
+                );
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    kit::eyebrow(ui, "Immutable plan · no files have moved");
+                    kit::eyebrow(ui, "Immutable plan · nothing has moved");
                     kit::label(
                         ui,
-                        format!(
-                            "{} across {} files",
-                            bytes(plan.total_bytes),
-                            plan.items.len()
-                        ),
+                        if folders {
+                            format!(
+                                "{} in {} · {}",
+                                bytes(plan.total_bytes),
+                                count_label(plan.items.len(), true),
+                                count_label(files as usize, false)
+                            )
+                        } else {
+                            format!(
+                                "{} across {} files",
+                                bytes(plan.total_bytes),
+                                plan.items.len()
+                            )
+                        },
                         24.0,
                         Weight::SemiBold,
                         p.text,
@@ -449,70 +541,145 @@ impl App {
                 });
             });
             ui.add_space(10.0);
-            kit::eyebrow(ui, "Exact files in this plan");
+            kit::eyebrow(
+                ui,
+                if folders {
+                    "Exact folders in this plan"
+                } else {
+                    "Exact files in this plan"
+                },
+            );
             egui::ScrollArea::vertical()
                 .id_salt("plan-files")
                 .max_height(230.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for item in &plan.items {
-                        Row::new(file_name(&item.path))
-                            .plain_icon(icons::FILE, p.text_2)
-                            .mono_subtitle(short_path(&item.path))
-                            .trailing(bytes(item.bytes), p.text)
+                        let row = match item.folder {
+                            Some(folder) => Row::new(short_path(&item.path))
+                                .plain_icon(icons::FOLDER, p.text_2)
+                                .subtitle(format!(
+                                    "{} · {}",
+                                    count_label(folder.files as usize, false),
+                                    folder_kind(&item.path)
+                                )),
+                            None => Row::new(file_name(&item.path))
+                                .plain_icon(icons::FILE, p.text_2)
+                                .mono_subtitle(short_path(&item.path)),
+                        };
+                        row.trailing(bytes(item.bytes), p.text)
                             .badge(&item.risk, p.amber)
                             .height(46.0)
                             .enabled(false)
                             .show(ui)
-                            .on_hover_text(&item.path);
+                            .on_hover_text(format!("{}\n{}", item.path, item.reason));
                     }
                 });
             ui.add_space(8.0);
             kit::divider(ui);
             ui.add_space(6.0);
-            kit::label(
+            // The same plan can be quarantined, which can be undone, or deleted outright.
+            let mut delete = self.plan_delete;
+            kit::segmented(
                 ui,
-                "Authorization is separate. Type the phrase exactly to approve these files:",
-                13.0,
-                Weight::Regular,
-                p.text_2,
+                egui::Id::new("plan-action"),
+                &mut delete,
+                &[(false, "Quarantine · reversible"), (true, "Delete permanently")],
             );
-            Card::new()
-                .fill(p.sunken)
-                .padding(10.0)
-                .radius(10.0)
-                .shrink()
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(&plan.approval_phrase)
-                            .font(fonts::mono_medium(14.0))
-                            .color(p.accent),
-                    );
-                });
-            let width = ui.available_width().min(520.0);
-            kit::text_field(
-                ui,
-                &mut self.approval,
-                "Type approval phrase",
-                Some(icons::LOCK_KEY),
-                width,
-                true,
-            );
+            if delete != self.plan_delete {
+                self.plan_delete = delete;
+                self.approval.clear();
+            }
+            ui.add_space(4.0);
+            let phrase = if delete {
+                delete_phrase(&plan.id)
+            } else {
+                plan.approval_phrase.clone()
+            };
+            let waiting = delete && self.engine.config.purge_after_hours > 0;
+            if delete {
+                kit::label(
+                    ui,
+                    format!(
+                        "Deletes {} permanently. Everything in it, {}, skips the Trash and cannot be restored: each item moves into quarantine, then goes, and anything that changed since this plan stays.",
+                        bytes(plan.total_bytes),
+                        count_label(files as usize, false)
+                    ),
+                    13.0,
+                    Weight::Medium,
+                    p.rose,
+                );
+            } else {
+                kit::label(
+                    ui,
+                    "Authorization is separate. Type the phrase exactly to approve this plan:",
+                    13.0,
+                    Weight::Regular,
+                    p.text_2,
+                );
+            }
+            if waiting {
+                kit::banner(
+                    ui,
+                    icons::HOURGLASS,
+                    &format!(
+                        "Deleting needs {} h in quarantine first. Quarantine now, then delete from the outcome once the time is up.",
+                        self.engine.config.purge_after_hours
+                    ),
+                    p.amber,
+                    false,
+                );
+            } else {
+                Card::new()
+                    .fill(p.sunken)
+                    .padding(10.0)
+                    .radius(10.0)
+                    .shrink()
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&phrase)
+                                .font(fonts::mono_medium(14.0))
+                                .color(if delete { p.rose } else { p.accent }),
+                        );
+                    });
+                let width = ui.available_width().min(520.0);
+                kit::text_field(
+                    ui,
+                    &mut self.approval,
+                    "Type approval phrase",
+                    Some(icons::LOCK_KEY),
+                    width,
+                    true,
+                );
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if Button::danger("Authorize quarantine")
-                    .icon(icons::ARCHIVE_BOX)
-                    .enabled(!self.busy && !expired && self.approval == plan.approval_phrase)
-                    .show(ui)
-                    .clicked()
-                {
+                let ready = !self.busy && !expired && !waiting && self.approval == phrase;
+                let clicked = if delete {
+                    !waiting
+                        && Button::danger("Delete permanently")
+                            .icon(icons::TRASH)
+                            .enabled(ready)
+                            .show(ui)
+                            .clicked()
+                } else {
+                    Button::danger("Authorize quarantine")
+                        .icon(icons::ARCHIVE_BOX)
+                        .enabled(ready)
+                        .show(ui)
+                        .clicked()
+                };
+                if clicked {
                     let approval = self.approval.clone();
                     let plan_id = plan.id.clone();
-                    self.task(Activity::Cleanup, move |e| {
-                        Ok(Payload::Operation(
-                            e.execute_cleanup_plan(&plan_id, &approval)?,
-                        ))
-                    });
+                    self.task(
+                        if delete {
+                            Activity::Purge
+                        } else {
+                            Activity::Cleanup
+                        },
+                        move |e| Ok(Payload::Operation(e.execute_cleanup_plan(&plan_id, &approval)?)),
+                    );
                 }
                 if Button::ghost("Back to selection")
                     .icon(icons::ARROW_LEFT)
@@ -573,10 +740,18 @@ impl App {
                 .show(ui, |ui| {
                     for item in &operation.items {
                         let (icon, color) = item_style(&p, &item.status);
-                        Row::new(file_name(&item.source))
+                        let title = match item.folder {
+                            Some(folder) => format!(
+                                "{} · folder of {}",
+                                file_name(&item.source),
+                                count_label(folder.files as usize, false)
+                            ),
+                            None => file_name(&item.source),
+                        };
+                        Row::new(title)
                             .plain_icon(icon, color)
                             .mono_subtitle(short_path(&item.source))
-                            .trailing(bytes(item.identity.size), p.text_2)
+                            .trailing(bytes(item.bytes()), p.text_2)
                             .badge(humanize(&item.status), color)
                             .height(46.0)
                             .enabled(false)
@@ -638,6 +813,7 @@ impl App {
         let p = self.palette;
         let phrase = purge_phrase(&operation.id);
         let wait = self.engine.purge_ready_at(operation).saturating_sub(now());
+        let folders = operation.items.iter().any(|i| i.folder.is_some());
         ui.add_space(14.0);
         Card::new()
             .tinted(p.rose)
@@ -651,8 +827,8 @@ impl App {
                         kit::label(
                             ui,
                             format!(
-                                "Delete {held} file{} permanently · {}",
-                                if held == 1 { "" } else { "s" },
+                                "Delete {} permanently · {}",
+                                count_label(held, folders),
                                 bytes(held_bytes)
                             ),
                             16.0,
@@ -661,7 +837,11 @@ impl App {
                         );
                         kit::caption(
                             ui,
-                            "This cannot be undone: the files skip the Trash and Stratum cannot restore them. Each file is checked against the content hash recorded when it moved, and anything that changed stays in quarantine.",
+                            if folders {
+                                "This cannot be undone: everything inside skips the Trash and Stratum cannot restore it. A folder goes only while it is still the one that moved; symlinks inside are removed, never followed."
+                            } else {
+                                "This cannot be undone: the files skip the Trash and Stratum cannot restore them. Each file is checked against the content hash recorded when it moved, and anything that changed stays in quarantine."
+                            },
                         );
                     });
                 });
@@ -743,6 +923,7 @@ fn holdings(
     held_bytes: u64,
     purged_bytes: u64,
 ) -> Option<String> {
+    let folders = operation.items.iter().any(|i| i.folder.is_some());
     let deleted = match operation.purged_at {
         Some(at) if purged_bytes > 0 => Some(format!(
             "{} deleted permanently {}",
@@ -754,8 +935,8 @@ fn holdings(
     match (held, deleted) {
         (0, deleted) => deleted,
         (n, deleted) => Some(format!(
-            "{n} file{} · {} held in quarantine{}",
-            if n == 1 { "" } else { "s" },
+            "{} · {} held in quarantine{}",
+            count_label(n, folders),
             bytes(held_bytes),
             deleted.map(|d| format!(" · {d}")).unwrap_or_default()
         )),
@@ -843,10 +1024,17 @@ fn candidate_row(
 }
 
 /// What a recognised folder is and what happens after it is emptied.
-fn location_kind(category: &str, path: &str) -> &'static str {
-    match category {
-        "developer_build_artifact" => "Cargo build output · rebuilt by the next build",
-        _ if path.ends_with("/_cacache") => "npm package cache · refilled by the next install",
-        _ => "Cargo registry cache · refilled by the next build",
+fn folder_kind(path: &str) -> &'static str {
+    if path.ends_with("/_cacache") {
+        "npm package cache · refilled by the next install"
+    } else if path.ends_with("/registry/cache") {
+        "Cargo registry cache · refilled by the next build"
+    } else {
+        "Cargo build output · rebuilt by the next build"
     }
+}
+/// "1 folder", "3 files": a count with its noun.
+fn count_label(n: usize, folders: bool) -> String {
+    let noun = if folders { "folder" } else { "file" };
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }

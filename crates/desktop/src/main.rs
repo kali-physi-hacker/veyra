@@ -219,7 +219,11 @@ struct App {
     history: Vec<HistoryPoint>,
     audit: Vec<AuditRecord>,
     selected: BTreeMap<String, u64>,
+    /// Whole recognised folders chosen on the folder list, with their indexed sizes.
+    selected_folders: BTreeMap<String, u64>,
     plan: Option<CleanupPlan>,
+    /// The plan review's choice: delete permanently rather than quarantine.
+    plan_delete: bool,
     operation: Option<CleanupOperation>,
     approval: String,
     /// Whether the permanent-deletion confirmation is open, and the phrase typed into it.
@@ -311,7 +315,9 @@ impl App {
             history: vec![],
             audit: vec![],
             selected: BTreeMap::new(),
+            selected_folders: BTreeMap::new(),
             plan: None,
+            plan_delete: false,
             operation: None,
             approval: String::new(),
             purge_open: false,
@@ -621,10 +627,11 @@ impl App {
                     Payload::History(v) => self.history = v,
                     Payload::Audit(v) => self.audit = v,
                     Payload::Plan(v) => {
-                        self.status = "Plan ready for review · no files moved".into();
+                        self.status = "Plan ready for review · nothing has moved".into();
                         self.plan = Some(v);
                         self.operation = None;
                         self.approval.clear();
+                        self.plan_delete = false;
                     }
                     Payload::Operation(v) => {
                         self.status = if v.status.starts_with("purge") {
@@ -642,6 +649,7 @@ impl App {
                         self.purge_open = false;
                         self.purge_typed.clear();
                         self.selected.clear();
+                        self.selected_folders.clear();
                         self.refresh();
                     }
                     Payload::Selection(v) => {

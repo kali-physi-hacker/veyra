@@ -113,3 +113,43 @@ fn separate_processes_quarantine_then_purge_with_its_own_phrase() {
     assert!(!artifact.exists());
     assert_eq!(run(&["cleanup", "operations"])[0]["in_quarantine"], 0);
 }
+#[test]
+fn a_whole_folder_is_planned_and_deleted_with_its_delete_phrase() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let data = root.join("fixture");
+    fs::create_dir_all(data.join("target/debug/deps")).unwrap();
+    fs::write(data.join("Cargo.toml"), "manifest").unwrap();
+    fs::write(data.join("target/debug/deps/a.rlib"), "generated").unwrap();
+    fs::write(data.join("target/debug/b"), "more").unwrap();
+    let state = root.join("state");
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+            .arg("--data-dir")
+            .arg(&state)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    run(&["scan", data.to_str().unwrap()]);
+    let target = data.join("target");
+    let plan = run(&["cleanup", "plan", "--folder", target.to_str().unwrap()]);
+    assert_eq!(plan["items"][0]["folder"]["files"], 2);
+    let operation = run(&[
+        "cleanup",
+        "execute",
+        plan["id"].as_str().unwrap(),
+        "--approve",
+        plan["delete_phrase"].as_str().unwrap(),
+    ]);
+    assert_eq!(operation["status"], "purged");
+    assert!(!target.exists());
+    assert!(data.join("Cargo.toml").is_file());
+}

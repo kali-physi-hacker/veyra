@@ -20,9 +20,9 @@ MCP is a transport, not the engine. An adapter can link `stratum-engine` in Rust
 
 1. Call `/storage/explain`, `/storage/history?since=<seven-days-ago>` and `/insights`. These return indexed contributors, observation timestamps, evidence, confidence, risk and coverage. If the oldest observation is newer than seven days, say so. An agent must not invent a week-long baseline.
 2. Inspect `/cleanup/candidates` and paginate the underlying file pages. The engine's categories and rules determine eligibility. The agent must not convert a large file or weak app association into a deletion recommendation.
-3. Submit a bounded, explicit path list to `/cleanup/plans`. This only creates a plan and performs read-only verification.
-4. Present exact selected items, reasons, byte estimates, risk, expiry, and quarantine limitations to the user. In particular, quarantine does not reclaim physical disk capacity; only a later, separately authorized purge does, and a purge cannot be undone.
-5. Only after explicit user authorization, send the separate execution request with the exact approval phrase. Neither an inspection request nor plan creation authorizes execution.
+3. Submit a bounded, explicit path list, or whole recognised folders, to `/cleanup/plans`. This only creates a plan and performs read-only verification.
+4. Present exact selected items, reasons, byte estimates, risk, expiry, and quarantine limitations to the user. In particular, quarantine does not reclaim physical disk capacity; only deletion does, through the plan's `DELETE` phrase or a later purge, and deletion cannot be undone.
+5. Only after explicit user authorization, send the separate execution request with the exact approval phrase. Neither an inspection request nor plan creation authorizes execution. Send `DELETE <plan-id>` only when the user has explicitly chosen permanent deletion of exactly this plan.
 6. Retain the operation ID. Inspect per-item statuses for partial failures; surface them. Use `/cleanup/operations/{id}/undo` only when restoration is requested. Expose audit records for accountability.
 7. Only if the user asks to reclaim the space, present what the operation still holds and that deletion is permanent, then, after a second explicit authorization, send `PURGE <operation-id>` to `/cleanup/operations/{id}/purge`. Authorization for the quarantine never carries over to a purge.
 
