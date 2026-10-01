@@ -92,7 +92,10 @@ mod tests {
             state.refresh();
             assert_eq!(state.begin(), None);
         }
-        assert!(state.finish(first), "a refresh must not make the answer on its way stale");
+        assert!(
+            state.finish(first),
+            "a refresh must not make the answer on its way stale"
+        );
         assert!(!state.waiting());
         assert!(state.loading(), "the refresh is still pending");
         let second = state.begin().unwrap();

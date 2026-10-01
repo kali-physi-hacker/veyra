@@ -243,11 +243,16 @@ const WAL_HARD_LIMIT: u64 = 2 << 30;
 /// `wait` for readers to move off it. False when readers or another checkpoint held it.
 fn truncate_wal(connection: &Connection, wait: Duration) -> Result<bool> {
     connection.busy_timeout(wait).map_err(db)?;
-    let busy: std::result::Result<i64, _> = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
+    let busy: std::result::Result<i64, _> =
+        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
     connection.busy_timeout(BUSY).map_err(db)?;
     match busy {
         Ok(busy) => Ok(busy == 0),
-        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy => Ok(false),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            Ok(false)
+        }
         Err(e) => Err(db(e)),
     }
 }
@@ -261,7 +266,9 @@ fn schema_version(connection: &Connection) -> Result<u32> {
 /// is rebuilt instead: the small tables are copied into a fresh file at the same schema
 /// version, which then takes the old file's place, and the ordinary migrations follow.
 fn wal_bytes(path: &Path) -> u64 {
-    std::fs::metadata(sidecar(path, "-wal")).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(sidecar(path, "-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -345,7 +352,9 @@ impl Store {
             match truncate_wal(&connection, Duration::from_millis(250)) {
                 Ok(true) => tracing::debug!("truncated the write-ahead log on open"),
                 Ok(false) => tracing::debug!("write-ahead log in use elsewhere; left for later"),
-                Err(e) => tracing::warn!(error = %e.message, "could not truncate the write-ahead log"),
+                Err(e) => {
+                    tracing::warn!(error = %e.message, "could not truncate the write-ahead log")
+                }
             }
         }
         Ok(Self {
@@ -434,8 +443,12 @@ impl Store {
                     return Ok(());
                 }
             }
-            tracing::warn!(wal_bytes = wal_bytes(&self.path), "write-ahead log still in use after the scan; it is truncated when next idle");
-            conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);").map_err(db)?;
+            tracing::warn!(
+                wal_bytes = wal_bytes(&self.path),
+                "write-ahead log still in use after the scan; it is truncated when next idle"
+            );
+            conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")
+                .map_err(db)?;
         }
         Ok(())
     }
@@ -511,9 +524,16 @@ impl Store {
         // long scan truncates it here once it grows, waiting a little longer the larger it is.
         let wal = wal_bytes(&self.path);
         if wal > WAL_SOFT_LIMIT {
-            let wait = if wal > WAL_HARD_LIMIT { Duration::from_secs(2) } else { Duration::from_millis(100) };
+            let wait = if wal > WAL_HARD_LIMIT {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(100)
+            };
             if !truncate_wal(&conn, wait)? {
-                tracing::debug!(wal_bytes = wal, "write-ahead log busy with readers; truncating after a later batch");
+                tracing::debug!(
+                    wal_bytes = wal,
+                    "write-ahead log busy with readers; truncating after a later batch"
+                );
             }
         }
         drop(conn);

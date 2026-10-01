@@ -17,7 +17,14 @@ fn entry(path: &str, bytes: u64) -> Entry {
         category: "documents".into(),
         confidence: 0.5,
         evidence: vec![Evidence::new("path_classification", "test")],
-        identity: Identity { device: 1, inode: bytes, size: bytes, modified_ns: 0, changed_ns: 0, links: 1 },
+        identity: Identity {
+            device: 1,
+            inode: bytes,
+            size: bytes,
+            modified_ns: 0,
+            changed_ns: 0,
+            links: 1,
+        },
         depth: 1,
     }
 }
@@ -40,7 +47,14 @@ fn record(id: &str) -> ScanRecord {
 fn stream(store: &Store, id: &str, batches: u64) {
     store.begin_scan(&record(id)).unwrap();
     for b in 0..batches {
-        let batch: Vec<Entry> = (0..1000).map(|i| entry(&format!("/root/{id}-{b:04}-{i:04}-{}", "x".repeat(60)), b * 1000 + i + 1)).collect();
+        let batch: Vec<Entry> = (0..1000)
+            .map(|i| {
+                entry(
+                    &format!("/root/{id}-{b:04}-{i:04}-{}", "x".repeat(60)),
+                    b * 1000 + i + 1,
+                )
+            })
+            .collect();
         store.insert_batch(id, &batch).unwrap();
     }
 }
@@ -51,13 +65,21 @@ fn a_finished_scan_leaves_no_write_ahead_log() {
     let store = Store::open(&temp.path().join("db")).unwrap();
     store.set_bulk(true).unwrap();
     stream(&store, "s1", 20);
-    assert!(store.wal_bytes() > 1 << 20, "the scan should have grown the WAL, got {}", store.wal_bytes());
+    assert!(
+        store.wal_bytes() > 1 << 20,
+        "the scan should have grown the WAL, got {}",
+        store.wal_bytes()
+    );
     let mut done = record("s1");
     done.status = "completed".into();
     done.completed_at = Some(now());
     store.finish_scan(&done, 30).unwrap();
     store.set_bulk(false).unwrap();
-    assert_eq!(store.wal_bytes(), 0, "the WAL should be truncated once the scan ends");
+    assert_eq!(
+        store.wal_bytes(),
+        0,
+        "the WAL should be truncated once the scan ends"
+    );
     assert_eq!(store.roots().unwrap(), vec!["/root".to_string()]);
 }
 
@@ -74,7 +96,11 @@ fn a_write_ahead_log_left_behind_is_folded_in_on_open() {
     // Opening the index again folds it into the database and truncates it, with the first
     // store still holding its connections, and nothing written is lost.
     let second = Store::open(&path).unwrap();
-    assert_eq!(second.wal_bytes(), 0, "a {left}-byte WAL should be truncated on open");
+    assert_eq!(
+        second.wal_bytes(),
+        0,
+        "a {left}-byte WAL should be truncated on open"
+    );
     let mut done = record("s1");
     done.status = "completed".into();
     done.completed_at = Some(now());

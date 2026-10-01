@@ -113,9 +113,15 @@ impl Engine {
                     let path = Path::new(&d.path);
                     let parent = path.parent()?;
                     let (category, reason) = match d.name.as_str() {
-                        "target" if parent.join("Cargo.toml").is_file() => ("developer_build_artifact", CARGO_TARGET_REASON),
-                        "_cacache" if parent.file_name().is_some_and(|n| n == ".npm") => ("package_cache", PACKAGE_CACHE_REASON),
-                        "cache" if d.path.ends_with("/.cargo/registry/cache") => ("package_cache", PACKAGE_CACHE_REASON),
+                        "target" if parent.join("Cargo.toml").is_file() => {
+                            ("developer_build_artifact", CARGO_TARGET_REASON)
+                        }
+                        "_cacache" if parent.file_name().is_some_and(|n| n == ".npm") => {
+                            ("package_cache", PACKAGE_CACHE_REASON)
+                        }
+                        "cache" if d.path.ends_with("/.cargo/registry/cache") => {
+                            ("package_cache", PACKAGE_CACHE_REASON)
+                        }
                         _ => return None,
                     };
                     self.cleanup_path_allowed(path).ok()?;
@@ -133,12 +139,19 @@ impl Engine {
             found.sort_by(|a, b| a.path.cmp(&b.path));
             let mut kept: Vec<CleanupLocation> = Vec::with_capacity(found.len());
             for loc in found {
-                if kept.last().is_some_and(|k| loc.path.starts_with(&format!("{}/", k.path))) {
+                if kept
+                    .last()
+                    .is_some_and(|k| loc.path.starts_with(&format!("{}/", k.path)))
+                {
                     continue;
                 }
                 kept.push(loc);
             }
-            kept.sort_by(|a, b| b.logical_bytes.cmp(&a.logical_bytes).then_with(|| a.path.cmp(&b.path)));
+            kept.sort_by(|a, b| {
+                b.logical_bytes
+                    .cmp(&a.logical_bytes)
+                    .then_with(|| a.path.cmp(&b.path))
+            });
             Ok(kept)
         };
         match scope {
